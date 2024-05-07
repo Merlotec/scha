@@ -1,0 +1,7 @@
+/target
+/depr
+/postcodes
+/pcodes
+/schooldata
+*.csv
+*.zip
