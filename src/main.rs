@@ -1,5 +1,6 @@
 use atomic::run_atomic;
 use csv::Writer;
+use geo_rust::{Country, GeoLocation};
 use regex::Regex;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{collections::HashMap, error::Error, io, os::windows::raw::SOCKET, path::Path, process};
@@ -177,18 +178,19 @@ struct RegionPcodeRecord {
 struct SchoolInfo<S: School> {
     record: S,
     ofsted: Option<OfstedRecord>,
+    lad: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct AggregateRecord {
     year: String,
-    lad: String,
+    lad: Option<String>,
     n: u32,
     n_valid: u32,
     score: Option<f32>,
     binary_weighted_p8: Option<f32>,
     weighted_p8: Option<f32>,
-    gsceg2_ag: Option<f32>,
+    gcseg2_ag: Option<f32>,
     gcseg2_dis_ag: Option<f32>,
     of_overall_ag: Option<f32>,
     of_educ_ag: Option<f32>,
@@ -225,7 +227,7 @@ impl AggregatePRecord {
 
 
 impl AggregateRecord {
-    pub fn empty(year: String, lad: String) -> Self {
+    pub fn empty(year: String, lad: Option<String>) -> Self {
         Self {
             year,
             lad,
@@ -237,17 +239,17 @@ impl AggregateRecord {
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct AggregateSchoolRecord {
     pub year: u32,
-    pub lad: String,
+    pub lad: Option<String>,
     pub name: String,
     pub pcode: String,
+    pub lat: Option<f64>,
+    pub lng: Option<f64>,
     pub urn: String,
     pub school_type: String,
     pub is_state: u32,
     pub is_selective: u32,
     pub p8: String,
     pub ebacc: String,
-    pub score: Option<f32>,
-    pub sc_p8: Option<f32>,
     pub of_overall: Option<u32>,
     pub of_educ: Option<u32>,
     pub of_behaviour: Option<u32>,
@@ -257,16 +259,39 @@ pub struct AggregateSchoolRecord {
     pub gcseg2_dis: Option<f32>,
 }
 
+impl AggregateSchoolRecord {
+    #[inline]
+    pub fn location(&self) -> Option<GeoLocation> {
+        if let (Some(lat), Some(lng)) = (self.lat, self.lng) {
+            Some(GeoLocation { latitude: lat, longitude: lng})
+        } else {
+            None
+        }
+    }
+}
+
+impl AggregatePSchoolRecord {
+    #[inline]
+    pub fn location(&self) -> Option<GeoLocation> {
+        if let (Some(lat), Some(lng)) = (self.lat, self.lng) {
+            Some(GeoLocation { latitude: lat, longitude: lng})
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct AggregatePSchoolRecord {
     pub year: u32,
-    pub lad: String,
+    pub lad: Option<String>,
     pub name: String,
     pub pcode: String,
+    pub lat: Option<f64>,
+    pub lng: Option<f64>,
     pub urn: String,
     pub school_type: String,
     pub is_state: u32,
-    pub score: Option<f32>,
     pub rwm_ta: Option<f32>,
     pub rwm_ta_dis: Option<f32>,
     pub of_overall: Option<u32>,
@@ -292,9 +317,7 @@ fn load_regions<P: AsRef<Path>>(path: P) -> Result<HashMap<String, String>, Box<
         if let Ok(record) = result {
             let mut lad = record.lad;
             lad.replace(".", "");
-            if LADs.contains(&lad.as_str()) {
-                region_map.insert(record.pcode.trim().to_owned(), lad.clone());
-            }
+            region_map.insert(record.pcode.trim().to_owned(), lad.clone());
         }
     }
 
@@ -369,7 +392,7 @@ fn parse_dset<P: AsRef<Path>, S: School + DeserializeOwned>(
     path: P,
     ofsted_data: &HashMap<String, OfstedRecord>,
     region_map: &HashMap<String, String>,
-) -> Result<HashMap<String, Vec<SchoolInfo<S>>>, Box<dyn Error>> {
+) -> Result<Vec<SchoolInfo<S>>, Box<dyn Error>> {
     let mut rdr = ReaderBuilder::new()
         //.has_headers(true)
         //.flexible(true)
@@ -377,7 +400,7 @@ fn parse_dset<P: AsRef<Path>, S: School + DeserializeOwned>(
 
     let mut iter = rdr.deserialize::<S>();
 
-    let mut schools: HashMap<String, Vec<SchoolInfo<S>>> = HashMap::new();
+    let mut schools: Vec<SchoolInfo<S>> = Vec::new();
 
     let mut man_n = 0;
     let mut man_a = 0;
@@ -388,33 +411,8 @@ fn parse_dset<P: AsRef<Path>, S: School + DeserializeOwned>(
         match result {
             Ok(record) => {
                 let ofsted = ofsted_data.get(record.get_urn()).cloned();
-                    //if let Some(mut lad) = region_map.get(record.pcode.trim()).cloned() {
-
-                    let mut lad: String = String::new();
-
-                    if let Some(ofsted) = &ofsted {
-                        lad = ofsted.lad.clone();
-                    } 
-                    if !LADs.contains(&lad.as_str()) {
-                        if let Some(l) = region_map.get(record.get_pcode().trim()).cloned() {
-                            lad = l;
-                        }
-                    }
-
-                    if LADs.contains(&lad.as_str()) {
-                        // Get ofsted data for school.
-                        if let Some(ofsted) = &ofsted {
-                            if LADs.contains(&ofsted.lad.as_str()) {
-                                lad = ofsted.lad.clone();
-                            }
-                        }
-                        let info = SchoolInfo { record, ofsted };
-                        if let Some(v) = schools.get_mut(&lad) {
-                            v.push(info);
-                        } else {
-                            schools.insert(lad, vec![info]);
-                        }
-                    }
+                let lad = region_map.get(record.get_pcode()).cloned();
+                schools.push(SchoolInfo { record, ofsted, lad })
             }
             Err(e) => {
                 println!("{}", e);
@@ -432,286 +430,6 @@ fn percentage_string_to_float(input: &str) -> Result<f32, std::num::ParseFloatEr
     cleaned.parse::<f32>().map(|n| n / 100.0)
 }
 
-const W_P8: f32 = 1.3;
-const W_EBAC: f32 = 1.3;
-const SC_P8_BASE: f32 = 0.5;
-
-fn aggregate_sec(
-    schools: &[SchoolInfo<SchoolRecord>],
-    year: u32,
-    lad: String,
-) -> Option<(AggregateRecord, Vec<AggregateSchoolRecord>)> {
-    if !schools.is_empty() {
-        let mut sum = 0.0;
-        let mut binary_weighted_p8 = 0.0;
-        let mut weighted_p8 = Scaler::new();
-        let mut records = Vec::new();
-
-        let mut gsce2_ag = Scaler::new();
-        let mut gsce2_dis_ag = Scaler::new();
-
-
-        let mut of_overall_ag = Scaler::new();
-        let mut of_behaviour_ag = Scaler::new();
-        let mut of_educ_ag = Scaler::new();
-        let mut of_pdev_ag = Scaler::new();
-        let mut of_sixthform_ag = Scaler::new();
-
-        let mut n_valid = 0;
-
-        let total_pop: u32 = schools
-            .iter()
-            .map(|x| x.record.pop.parse::<u32>().unwrap_or(500))
-            .sum();
-
-        for school in schools {
-            let mut components = Vec::new();
-
-            let mut good_sch: bool = false;
-
-            let mut sc_p8: Option<f32> = None;
-
-            let pop = school.record.pop.parse::<u32>().unwrap_or(500);
-            let w = pop as f32 / total_pop as f32;
-
-            let gcseg2 = percentage_string_to_float(&school.record.gcseg2).ok();
-            let gcseg2_dis = percentage_string_to_float(&school.record.gcseg2_dis).ok();
-
-            let selective = school.record.adm_pol == "SEL";
-
-            // Only choose the right kind of schools.
-            let state = TARGET_SCHOOL_TYPES.contains(&school.record.school_type.as_str()) && !selective;
-            if state && !selective {
-                n_valid += 1;
-                if let Some(x) = gcseg2 {
-                    gsce2_ag.add(x, w);
-                }
-
-                if let Some(x) = gcseg2_dis {
-                    gsce2_dis_ag.add(x, w);
-                }
-
-                if let Some(of) = school.ofsted.as_ref().and_then(|o| o.overall) {
-                    of_overall_ag.add(of as f32, w);
-                }
-                if let Some(of) = school.ofsted.as_ref().and_then(|o| o.behaviour) {
-                    of_behaviour_ag.add(of as f32, w);
-                }
-                if let Some(of) = school.ofsted.as_ref().and_then(|o| o.educ) {
-                    of_educ_ag.add(of as f32, w);
-                }
-                if let Some(of) = school.ofsted.as_ref().and_then(|o| o.pdev) {
-                    of_pdev_ag.add(of as f32, w);
-                }
-                if let Some(of) = school.ofsted.as_ref().and_then(|o| o.sixthform) {
-                    of_sixthform_ag.add(of as f32, w);
-                }
-    
-                if let Ok(x) = school.record.p8.parse::<f32>() {
-                    weighted_p8.add(x, w);
-                    components.push(x);
-                    good_sch = x >= 0.0;
-    
-                    if good_sch {
-                        if let Ok(pop) = school.record.pop.parse::<u32>() {
-                            let p = (SC_P8_BASE + x) * w;
-                            sc_p8 = Some(p);
-                            binary_weighted_p8 += p;
-                        }
-                    }
-                }
-    
-                if let Some(x) = school.ofsted.as_ref().and_then(|s| s.overall) {
-                    components.push((x as f32 * 0.1) - 1.0);
-                }
-                // if let Ok(x) = percentage_string_to_float(&school.gcseg5) {
-                //     components.push(x);
-                // }
-                if let Ok(x) = school.record.ebacc.parse::<f32>() {
-                    components.push((x));
-                }
-            }            
-
-            let mut sc: Option<f32> = None;
-            if !components.is_empty() {
-                let score = components.iter().sum::<f32>();
-                let s = score / components.len() as f32;
-                sum += s;
-                sc = Some(s);
-            } else {
-                //println!("EMPTY SCHOOL: {}, {}", &school.ebacc, &school.p8);
-            }
-
-            records.push(AggregateSchoolRecord {
-                year,
-                name: school.record.name.clone(),
-                pcode: school.record.pcode.clone(),
-                urn: school.record.urn.clone(),
-                is_selective: selective as u32,
-                school_type: school.record.school_type.clone(),
-                is_state: state as u32,
-                lad: lad.clone(),
-                ebacc: school.record.ebacc.clone(),
-                p8: school.record.p8.clone(),
-                score: sc,
-                sc_p8,
-                of_overall: school.ofsted.as_ref().and_then(|x| x.overall),
-                of_behaviour: school.ofsted.as_ref().and_then(|x| x.behaviour),
-                of_educ: school.ofsted.as_ref().and_then(|x| x.educ),
-                of_pdev: school.ofsted.as_ref().and_then(|x| x.pdev),
-                of_sixthform: school.ofsted.as_ref().and_then(|x| x.sixthform),
-
-                gcseg2,
-                gcseg2_dis,
-            })
-        }
-        let ave = sum / schools.len() as f32;
-
-        Some((
-            AggregateRecord {
-                lad,
-                n: schools.len() as u32,
-                score: Some(ave),
-                year: year.to_string(),
-                binary_weighted_p8: Some(binary_weighted_p8),
-                weighted_p8: weighted_p8.ave(),
-                of_overall_ag: of_overall_ag.ave(),
-                of_behaviour_ag: of_behaviour_ag.ave(),
-                of_educ_ag: of_educ_ag.ave(),
-                of_pdev_ag: of_pdev_ag.ave(),
-                of_sixthform_ag: of_sixthform_ag.ave(),
-                n_valid,
-                gsceg2_ag: gsce2_ag.ave(),
-                gcseg2_dis_ag: gsce2_dis_ag.ave(),
-            },
-            records,
-        ))
-    } else {
-        None
-    }
-}
-
-
-fn aggregate_prim(
-    schools: &[SchoolInfo<PSchoolRecord>],
-    year: u32,
-    lad: String,
-) -> Option<(AggregatePRecord, Vec<AggregatePSchoolRecord>)> {
-    if !schools.is_empty() {
-        let mut records = Vec::new();
-        let mut sum = 0.0;
-        let mut of_overall_ag = Scaler::new();
-        let mut of_behaviour_ag = Scaler::new();
-        let mut of_educ_ag = Scaler::new();
-        let mut of_pdev_ag = Scaler::new();
-
-        let mut rwm_ta_ag = Scaler::new();
-        let mut rwm_ta_dis_ag = Scaler::new();
-
-        let mut n_valid: u32 = 0;
-
-        let total_pop: u32 = schools
-            .iter()
-            .map(|x| x.record.pop.parse::<u32>().unwrap_or(500))
-            .sum();
-
-        for school in schools {
-            let mut components = Vec::new();
-            let pop = school.record.pop.parse::<u32>().unwrap_or(500);
-            let w = pop as f32 / total_pop as f32;
-
-            let rwm_ta = percentage_string_to_float(&school.record.rwm_ta).ok();
-            let rwm_ta_dis = percentage_string_to_float(&school.record.rwm_ta_dis).ok();
-            let state = TARGET_SCHOOL_TYPES.contains(&school.record.school_type.as_str());
-            if state {
-                n_valid += 1;
-                if let Some(x) = rwm_ta {
-                    rwm_ta_ag.add(x, w);
-                }
-
-                if let Some(x) = rwm_ta_dis {
-                    rwm_ta_dis_ag.add(x, w);
-                }
-
-                if let Some(of) = school.ofsted.as_ref().and_then(|o| o.overall) {
-                    of_overall_ag.add(of as f32, w);
-                }
-                if let Some(of) = school.ofsted.as_ref().and_then(|o| o.behaviour) {
-                    of_behaviour_ag.add(of as f32, w);
-                }
-                if let Some(of) = school.ofsted.as_ref().and_then(|o| o.educ) {
-                    of_educ_ag.add(of as f32, w);
-                }
-                if let Some(of) = school.ofsted.as_ref().and_then(|o| o.pdev) {
-                    of_pdev_ag.add(of as f32, w);
-                }
-
-                if let Some(x) = school.ofsted.as_ref().and_then(|s| s.overall) {
-                    components.push((x as f32 * 0.1) - 1.0);
-                }
-                // if let Ok(x) = percentage_string_to_float(&school.gcseg5) {
-                //     components.push(x);
-                // }
-                if let Some(x) = school.ofsted.as_ref().and_then(|s| s.educ) {
-                    components.push((x as f32 * 0.1) - 1.0);
-                }
-
-                if let Some(x) = school.ofsted.as_ref().and_then(|s| s.behaviour) {
-                    components.push((x as f32 * 0.1) - 1.0);
-                }
-            }
-            let mut sc: Option<f32> = None;
-            if !components.is_empty() {
-                let score = components.iter().sum::<f32>();
-                let s = score / components.len() as f32;
-                sum += s;
-                sc = Some(s);
-            } else {
-                //println!("EMPTY SCHOOL: {}, {}", &school.ebacc, &school.p8);
-            }
-
-
-            records.push(AggregatePSchoolRecord {
-                year,
-                name: school.record.name.clone(),
-                pcode: school.record.pcode.clone(),
-                urn: school.record.urn.clone(),
-                is_state: state as u32,
-                school_type: school.record.school_type.clone(),
-                lad: lad.clone(),
-                score: sc,
-                of_overall: school.ofsted.as_ref().and_then(|x| x.overall),
-                of_behaviour: school.ofsted.as_ref().and_then(|x| x.behaviour),
-                of_educ: school.ofsted.as_ref().and_then(|x| x.educ),
-                of_pdev: school.ofsted.as_ref().and_then(|x| x.pdev),
-                rwm_ta,
-                rwm_ta_dis,
-            })
-        }
-
-        let ave = sum / schools.len() as f32;
-
-        Some((
-            AggregatePRecord {
-                lad,
-                n: schools.len() as u32,
-                n_valid,
-                year: year.to_string(),
-                score: Some(ave),
-                of_overall_ag: of_overall_ag.ave(),
-                of_behaviour_ag: of_behaviour_ag.ave(),
-                of_educ_ag: of_educ_ag.ave(),
-                of_pdev_ag: of_pdev_ag.ave(),
-                rwm_ta_ag: rwm_ta_ag.ave(),
-                rwm_ta_dis_ag: rwm_ta_dis_ag.ave(),
-            },
-            records,
-        ))
-    } else {
-        None
-    }
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
     //run_schools()
     run_atomic()
@@ -722,14 +440,17 @@ fn run_schools() -> Result<(), Box<dyn Error>> {
     let regions = load_regions("postcodes.csv")?;
     let ofsted = load_ofsted("ofsted.csv")?;
 
+    let mut geo_map = load_geo_data("geo.csv")?;
+    let geonames_data = geo_rust::get_postal_data(Country::UnitedKingdomFull);
+
     println!("parsed postcodes, {}", regions.len());
     let mut agg_sec: Vec<(u32, Vec<AggregateRecord>)> = Vec::new();
 
     let mut agg_prim: Vec<(u32, Vec<AggregatePRecord>)> = Vec::new();
 
-    let mut complete_writer_sec = Writer::from_path("scout_full_sec.csv")?;
+    let mut complete_writer_sec = Writer::from_path("all_sec.csv")?;
 
-    let mut complete_writer_prim = Writer::from_path("scout_full_prim.csv")?;
+    let mut complete_writer_prim = Writer::from_path("all_prim.csv")?;
 
     for i in 2017..2024 {
         // let fname: String = format!("scraw_{}.csv", i);
@@ -740,35 +461,44 @@ fn run_schools() -> Result<(), Box<dyn Error>> {
         // continue;
         {
             let fname = format!("san_scraw_{}.csv", i);
-            let mut yr = Vec::new();
 
-            match parse_dset(fname, &ofsted, &regions) {
+            match parse_dset::<String, SchoolRecord>(fname, &ofsted, &regions) {
                 Ok(schools) => {
-                    let mut keys: Vec<&str> = schools.keys().map(|k| k.as_str()).collect();
-                    keys.sort();
-
-                    for key in LADs {
-                        if let Some(regional_schools) = &schools.get(key) {
-                            if let Some((agg, records)) =
-                                aggregate_sec(&regional_schools, i, key.to_owned())
-                            {
-                                yr.push(agg);
-
-                                for rec in records {
-                                    complete_writer_sec.serialize(&rec);
-                                }
-                            } else {
-                                yr.push(AggregateRecord::empty(i.to_string(), key.to_owned()));
-                                println!("No schools found for: {}", key);
-                            }
-                        } else {
-                            println!("No entry found for: {}", key);
-                            yr.push(AggregateRecord::empty(i.to_string(), key.to_owned()));
-                        }
+                    for school in schools {
+                        let gcseg2 = percentage_string_to_float(&school.record.gcseg2).ok();
+                        let gcseg2_dis = percentage_string_to_float(&school.record.gcseg2_dis).ok();
+            
+                        let selective = school.record.adm_pol == "SEL";
+            
+                        let loc = geo_data(&school.record.pcode, &mut geo_map, &geonames_data);
                         
+                        // Only choose the right kind of schools.
+                        let state = TARGET_SCHOOL_TYPES.contains(&school.record.school_type.as_str()) && !selective;
+                        complete_writer_sec.serialize(&AggregateSchoolRecord {
+                            year: i,
+                            name: school.record.name.clone(),
+                            pcode: school.record.pcode.clone(),
+                            lat: loc.as_ref().map(|x| x.latitude),
+                            lng: loc.map(|x| x.longitude),
+                            urn: school.record.urn.clone(),
+                            is_selective: selective as u32,
+                            school_type: school.record.school_type.clone(),
+                            is_state: state as u32,
+                            lad: school.lad,
+                            ebacc: school.record.ebacc.clone(),
+                            p8: school.record.p8.clone(),
+                            of_overall: school.ofsted.as_ref().and_then(|x| x.overall),
+                            of_behaviour: school.ofsted.as_ref().and_then(|x| x.behaviour),
+                            of_educ: school.ofsted.as_ref().and_then(|x| x.educ),
+                            of_pdev: school.ofsted.as_ref().and_then(|x| x.pdev),
+                            of_sixthform: school.ofsted.as_ref().and_then(|x| x.sixthform),
+            
+                            gcseg2,
+                            gcseg2_dis,
+                        });
                     }
 
-                    agg_sec.push((i, yr));
+                    
                     println!("parsed schools {}", i);
                 }
                 Err(e) => println!("Failed to parse school: {}", e),
@@ -778,57 +508,37 @@ fn run_schools() -> Result<(), Box<dyn Error>> {
         // Primary
         {
             let fname = format!("san_scrawp_{}.csv", i);
-            let mut yr = Vec::new();
 
             match parse_dset::<String, PSchoolRecord>(fname, &ofsted, &regions) {
                 Ok(schools) => {
-                    let mut keys: Vec<&str> = schools.keys().map(|k| k.as_str()).collect();
-                    keys.sort();
+                    for school in schools {
+                        let rwm_ta = percentage_string_to_float(&school.record.rwm_ta).ok();
+                        let rwm_ta_dis = percentage_string_to_float(&school.record.rwm_ta_dis).ok();
+                        let loc = geo_data(&school.record.pcode, &mut geo_map, &geonames_data);
 
-                    for key in LADs {
-                        if let Some(regional_schools) = &schools.get(key) {
-                            if let Some((agg, records)) =
-                                aggregate_prim(&regional_schools, i, key.to_owned())
-                            {
-                                yr.push(agg);
-
-                                for rec in records {
-                                    complete_writer_prim.serialize(&rec);
-                                }
-                            } else {
-                                yr.push(AggregatePRecord::empty(i.to_string(), key.to_owned()));
-                                println!("No schools found for: {}", key);
-                            }
-                        } else {
-                            println!("No entry found for: {}", key);
-                            yr.push(AggregatePRecord::empty(i.to_string(), key.to_owned()));
-                        }
-                        
+                        // Only choose the right kind of schools.
+                        let state = TARGET_SCHOOL_TYPES.contains(&school.record.school_type.as_str());
+                        complete_writer_prim.serialize(&AggregatePSchoolRecord {
+                            year: i,
+                            name: school.record.name.clone(),
+                            pcode: school.record.pcode.clone(),
+                            lat: loc.as_ref().map(|x| x.latitude),
+                            lng: loc.map(|x| x.longitude),
+                            urn: school.record.urn.clone(),
+                            is_state: state as u32,
+                            school_type: school.record.school_type.clone(),
+                            lad: school.lad,
+                            of_overall: school.ofsted.as_ref().and_then(|x| x.overall),
+                            of_behaviour: school.ofsted.as_ref().and_then(|x| x.behaviour),
+                            of_educ: school.ofsted.as_ref().and_then(|x| x.educ),
+                            of_pdev: school.ofsted.as_ref().and_then(|x| x.pdev),
+                            rwm_ta,
+                            rwm_ta_dis,
+                        });
                     }
-
-                    agg_prim.push((i, yr));
-                    println!("parsed schools {}", i);
+                    println!("parsed pschools {}", i);
                 }
                 Err(e) => println!("Failed to parse school: {}", e),
-            }
-        }
-    }
-
-    {
-        let mut writer = Writer::from_path("scout_sec.csv")?;
-
-        for (_, rows) in agg_sec {
-            for row in rows {
-                writer.serialize(&row);
-            }
-        }
-    }
-    {
-        let mut writer = Writer::from_path("scout_prim.csv")?;
-
-        for (_, rows) in agg_prim {
-            for row in rows {
-                writer.serialize(&row);
             }
         }
     }
@@ -838,6 +548,8 @@ fn run_schools() -> Result<(), Box<dyn Error>> {
 }
 
 use csv::ReaderBuilder;
+
+use crate::atomic::{geo_data, load_geo_data};
 
 fn combine_csv_files(input_folder: &str, output_file: &str) -> Result<(), Box<dyn Error>> {
     let mut writer = Writer::from_path(output_file)?;
