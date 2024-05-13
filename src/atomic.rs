@@ -2,7 +2,7 @@ use csv::{ReaderBuilder, StringRecord, Writer};
 use geo_rust::{get_postcode_location, Country, GeoLocation, PostalData};
 use regex::Regex;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{clone, collections::HashMap, error::Error, fs::File, io::{self, Write}, os::windows::raw::SOCKET, path::Path, process};
+use std::{clone, collections::HashMap, error::Error, fs::File, io::{self, Write}, os::windows::raw::SOCKET, path::Path, process, sync::{Arc, Mutex}};
 
 use crate::{first_letters, load_regions, AggregatePSchoolRecord, AggregateSchoolRecord, Scaler, CUM_RPI_DEFL};
 
@@ -74,6 +74,10 @@ pub struct ProcessedPcodeRecord {
     pub weighted_sec_gcseg2: Option<f32>,
     pub weighted_sec_gcseg2_dis: Option<f32>,
 
+    pub best_sec_gcseg2: Option<f32>,
+    pub best_sec_gcseg2_dis: Option<f32>,
+    pub best_sec_of_overall: Option<u32>,
+
     // Primary
     pub closest_prim_urn: Option<String>,
     pub closest_prim_name: Option<String>,
@@ -90,6 +94,10 @@ pub struct ProcessedPcodeRecord {
     pub weighted_prim_of_behaviour: Option<f32>, 
     pub weighted_prim_rwm_ta: Option<f32>,
     pub weighted_prim_rwm_ta_dis: Option<f32>,
+
+    pub best_prim_rwm_ta: Option<f32>,
+    pub best_prim_rwm_ta_dis: Option<f32>,
+    pub best_prim_of_overall: Option<u32>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -146,6 +154,10 @@ pub struct RegionalProcessedPcodeRecord {
     pub weighted_sec_gcseg2: Option<f32>,
     pub weighted_sec_gcseg2_dis: Option<f32>,
 
+    pub best_sec_gcseg2: Option<f32>, // selected by school with highest best_sec_gcseg2_dis
+    pub best_sec_gcseg2_dis: Option<f32>,
+    pub best_sec_of_overall: Option<u32>,
+
     // Primary
     pub closest_prim_urn: Option<String>,
     pub closest_prim_name: Option<String>,
@@ -162,6 +174,10 @@ pub struct RegionalProcessedPcodeRecord {
     pub weighted_prim_of_behaviour: Option<f32>, 
     pub weighted_prim_rwm_ta: Option<f32>,
     pub weighted_prim_rwm_ta_dis: Option<f32>,
+
+    pub best_prim_rwm_ta: Option<f32>, // selected by school with highest best_prim_rwm_ta_dis
+    pub best_prim_rwm_ta_dis: Option<f32>,
+    pub best_prim_of_overall: Option<u32>,
 }
 
 impl RegionalProcessedPcodeRecord {
@@ -209,6 +225,9 @@ impl RegionalProcessedPcodeRecord {
             weighted_sec_of_sixthform: record.weighted_sec_of_sixthform,
             weighted_sec_gcseg2: record.weighted_sec_gcseg2,
             weighted_sec_gcseg2_dis: record.weighted_sec_gcseg2_dis,
+            best_sec_gcseg2: record.best_sec_gcseg2,
+            best_sec_gcseg2_dis: record.best_sec_gcseg2_dis,
+            best_sec_of_overall: record.best_sec_of_overall,
             closest_prim_urn: record.closest_prim_urn,
             closest_prim_name: record.closest_prim_name,
             closest_prim_pcode: record.closest_prim_pcode,
@@ -223,6 +242,9 @@ impl RegionalProcessedPcodeRecord {
             weighted_prim_of_behaviour: record.weighted_prim_of_behaviour,
             weighted_prim_rwm_ta: record.weighted_prim_rwm_ta,
             weighted_prim_rwm_ta_dis: record.weighted_prim_rwm_ta_dis,
+            best_prim_rwm_ta: record.best_prim_rwm_ta,
+            best_prim_rwm_ta_dis: record.best_prim_rwm_ta_dis,
+            best_prim_of_overall: record.best_prim_of_overall,
         }
     }
 }
@@ -347,7 +369,34 @@ pub struct GeoData<W: Write> {
     map: HashMap<String, GeoRecord>,
 }
 
-pub fn load_geo_data<P: AsRef<Path>>(path: P) -> Result<GeoData<File>, Box<dyn Error>> {
+pub struct CGeoData {
+    map: HashMap<String, GeoRecord>
+}
+
+// pub fn load_geo_data<P: AsRef<Path>>(path: P) -> Result<GeoData<File>, Box<dyn Error>> {
+    
+//     let map = {
+//         let mut map = HashMap::new();
+//         if let Ok(mut rdr) = ReaderBuilder::new()
+//         //.has_headers(true)
+//         //.flexible(true)
+//         .from_path(&path) {
+//             let mut iter = rdr.deserialize::<GeoRecord>();
+//             for record in iter {
+//                 if let Ok(record) = record {
+//                     map.insert(record.pcode.clone(), record);
+//                 }
+//             }
+//         }
+//         map
+//     };
+
+//     let writer = Writer::from_path(path)?;
+
+//     Ok(GeoData { writer, map })
+// }
+
+pub fn load_geo_data<P: AsRef<Path>>(path: P) -> Result<CGeoData, Box<dyn Error>> {
     
     let map = {
         let mut map = HashMap::new();
@@ -365,9 +414,7 @@ pub fn load_geo_data<P: AsRef<Path>>(path: P) -> Result<GeoData<File>, Box<dyn E
         map
     };
 
-    let writer = Writer::from_path(path)?;
-
-    Ok(GeoData { writer, map })
+    Ok(CGeoData { map })
 }
 
 pub fn load_regional_data<P: AsRef<Path>>(path: P) -> Result<HashMap<String, RegionRecord>, Box<dyn Error>> {
@@ -386,15 +433,27 @@ pub fn load_regional_data<P: AsRef<Path>>(path: P) -> Result<HashMap<String, Reg
     Ok(map)
 }
 
-pub fn geo_data<W: Write>(pcode: &str, map: &mut GeoData<W>, geonames_data: &[PostalData]) -> Option<GeoLocation> {
+// pub fn geo_data<W: Write>(pcode: &str, map: &mut GeoData<W>, geonames_data: &[PostalData]) -> Option<GeoLocation> {
+//     if let Some(v) = map.map.get(pcode.trim()) {
+//         Some(GeoLocation { latitude: v.lat, longitude: v.long })
+//     } else {
+//         if let Some(d) = get_postcode_location(pcode.trim(), geonames_data) {
+//             let pcode = pcode.trim().to_owned();
+//             let rec = GeoRecord { pcode: pcode.clone(), lat: d.latitude, long: d.longitude };
+//             map.writer.serialize(&rec);
+//             map.map.insert(pcode.trim().to_owned(), rec);
+//             Some(d)
+//         } else {
+//             None
+//         }
+//     }
+// }
+
+pub fn geo_data(pcode: &str, map: &CGeoData, geonames_data: &[PostalData]) -> Option<GeoLocation> {
     if let Some(v) = map.map.get(pcode.trim()) {
         Some(GeoLocation { latitude: v.lat, longitude: v.long })
     } else {
         if let Some(d) = get_postcode_location(pcode.trim(), geonames_data) {
-            let pcode = pcode.trim().to_owned();
-            let rec = GeoRecord { pcode: pcode.clone(), lat: d.latitude, long: d.longitude };
-            map.writer.serialize(&rec);
-            map.map.insert(pcode.trim().to_owned(), rec);
             Some(d)
         } else {
             None
@@ -405,42 +464,20 @@ pub fn geo_data<W: Write>(pcode: &str, map: &mut GeoData<W>, geonames_data: &[Po
 const MAX_DIST: f32 = 5.0;
 const LONDON: GeoLocation = GeoLocation { latitude: 51.5072, longitude: -0.1275 };
 
-pub fn aggregate_pdata<P: AsRef<Path>, W: Write>(path: P, pcodes: HashMap<String, Vec<(PcodeRecord, Option<String>)>>, sec_schools: Vec<AggregateSchoolRecord>, prim_schools: Vec<AggregatePSchoolRecord>, towns: Vec<Town>, cities: Vec<Town>, geo_map: &mut GeoData<W>, regional_data: &HashMap<String, RegionRecord>, year_range: std::ops::Range<u32>) -> Result<(), Box<dyn Error>> {
+pub fn aggregate_pdata(writer: Arc<Mutex<Writer<File>>>, pcodes: HashMap<String, Vec<(PcodeRecord, Option<String>)>>, sec_map:Arc<HashMap<u32, Vec<AggregateSchoolRecord>>>, prim_map: Arc<HashMap<u32, Vec<AggregatePSchoolRecord>>>, towns: Arc<Vec<Town>>, cities: Arc<Vec<Town>>, geo_map: Arc<CGeoData>, regional_data: Arc<HashMap<String, RegionRecord>>, year_range: std::ops::Range<u32>) -> Result<(), Box<dyn Error>> {
     let geonames_data = geo_rust::get_postal_data(Country::UnitedKingdomFull);
     
-    let mut writer = Writer::from_path(path)?;
+    //let mut writer = Writer::from_path(path)?;
 
     //let mut processed_records: Vec<ProcessedPcodeRecord> = Vec::new();
     let len = pcodes.len();
-
-    let mut sec_map: HashMap<u32, Vec<AggregateSchoolRecord>> = HashMap::new();
-    println!("Loading sec school geo data - may take some time...");
-
-    for sch in sec_schools {
-        if let Some(m) = sec_map.get_mut(&sch.year) {
-            m.push(sch);
-        } else {
-            sec_map.insert(sch.year, vec![sch]);
-        }
-    }
-
-    let mut prim_map: HashMap<u32, Vec<AggregatePSchoolRecord>> = HashMap::new();
-    println!("Loading prim school geo data - may take some time...");
-
-    for sch in prim_schools {
-        if let Some(m) = prim_map.get_mut(&sch.year) {
-            m.push(sch);
-        } else {
-            prim_map.insert(sch.year, vec![sch]);
-        }
-    }
 
 
     for (i, (pcode, records)) in pcodes.into_iter().enumerate() {
         if i % 1000 == 0 {
             println!("Parsing {} of {} pcodes ({} records)", i, len, records.len());
         }
-        let pc_loc =  geo_data(&pcode, geo_map, &geonames_data);
+        let pc_loc =  geo_data(&pcode, &geo_map, &geonames_data);
 
         let mut closest_town: Option<Town> = None;
         let mut closest_town_dist: Option<f64> = None;
@@ -502,6 +539,15 @@ pub fn aggregate_pdata<P: AsRef<Path>, W: Write>(path: P, pcodes: HashMap<String
                 let mut weighted_prim_rwm_ta: Scaler = Scaler::new();
                 let mut weighted_prim_rwm_ta_dis: Scaler = Scaler::new();
                 let mut weighted_prim_of_overall: Scaler = Scaler::new();
+
+                let mut best_sec_gcseg2: Option<f32> = None;
+                let mut best_sec_gcseg2_dis: Option<f32> = None;
+                let mut best_sec_of_overall: Option<u32> = None; // Separate to above
+
+                let mut best_prim_rwm_ta: Option<f32> = None;
+                let mut best_prim_rwm_ta_dis: Option<f32> = None;
+                let mut best_prim_of_overall: Option<u32> = None; // Separate to above
+        
         
                 let mut sec_est_year: Option<u32> = None;
                 let mut prim_est_year: Option<u32> = None;
@@ -539,6 +585,15 @@ pub fn aggregate_pdata<P: AsRef<Path>, W: Write>(path: P, pcodes: HashMap<String
 
                             // Add weights.
                             if w > 0.0 {
+                                if best_sec_gcseg2.map(|x| school.gcseg2 > Some(x)).unwrap_or(true) {
+                                    best_sec_gcseg2_dis = school.gcseg2_dis;
+                                    best_sec_gcseg2 = school.gcseg2;
+                                }
+
+                                if best_sec_of_overall.map(|x| school.of_overall < Some(x)).unwrap_or(true) {
+                                    best_sec_of_overall = school.of_overall;
+                                }
+
                                 if let Some(x) = school.of_educ {
                                     weighted_sec_of_educ.add(x as f32, w);
                                 }
@@ -601,6 +656,15 @@ pub fn aggregate_pdata<P: AsRef<Path>, W: Write>(path: P, pcodes: HashMap<String
                             
                             // Add weights.
                             if w > 0.0 {
+                                if best_prim_rwm_ta.map(|x| school.rwm_ta > Some(x)).unwrap_or(true) {
+                                    best_prim_rwm_ta_dis = school.rwm_ta_dis;
+                                    best_prim_rwm_ta = school.rwm_ta;
+                                }
+
+                                if best_prim_of_overall.map(|x| school.of_overall < Some(x)).unwrap_or(true) {
+                                    best_prim_of_overall = school.of_overall;
+                                }
+
                                 if let Some(x) = school.of_educ {
                                     weighted_prim_of_educ.add(x as f32, w);
                                 }
@@ -641,7 +705,8 @@ pub fn aggregate_pdata<P: AsRef<Path>, W: Write>(path: P, pcodes: HashMap<String
                 };
 
                 if (year_range.contains(&record.year)) {
-                    writer.serialize(&RegionalProcessedPcodeRecord {
+
+                    writer.lock().unwrap().serialize(&RegionalProcessedPcodeRecord {
                         id: record.id,
                         after_covid: (record.year >= 2021) as u32,
                         age_band: age_band,
@@ -702,6 +767,14 @@ pub fn aggregate_pdata<P: AsRef<Path>, W: Write>(path: P, pcodes: HashMap<String
                         weighted_sec_of_behaviour: weighted_sec_of_behaviour.ave(),
                         weighted_sec_of_overall: weighted_sec_of_overall.ave(),
                         weighted_sec_of_sixthform: weighted_sec_of_sixthform.ave(),
+
+                        best_sec_gcseg2,
+                        best_sec_gcseg2_dis,
+                        best_sec_of_overall,
+
+                        best_prim_of_overall, 
+                        best_prim_rwm_ta, 
+                        best_prim_rwm_ta_dis,
                     });
                 }
             }
@@ -774,10 +847,10 @@ pub fn run_atomic() -> Result<(), Box<dyn Error>> {
     let postcodes = parse_postcodes("pdata.csv", &regions, year_range)?;
     println!("Parsed {} postcodes", postcodes.len());
 
-    let sec_data = load_school_data("all_sec.csv")?;
+    let sec_data: Vec<AggregateSchoolRecord> = load_school_data("all_sec.csv")?;
     println!("Loaded {} sec schools", sec_data.len());
 
-    let prim_data = load_school_data("all_prim.csv")?;
+    let prim_data: Vec<AggregatePSchoolRecord> = load_school_data("all_prim.csv")?;
     println!("Loaded {} prim schools", prim_data.len());
 
     let towns_data = parse_cities("towns.csv")?;
@@ -788,10 +861,67 @@ pub fn run_atomic() -> Result<(), Box<dyn Error>> {
 
     let mut geo_data = load_geo_data("geo.csv")?;
 
+    let mut sec_map: HashMap<u32, Vec<AggregateSchoolRecord>> = HashMap::new();
+    println!("Loading sec school geo data - may take some time...");
 
+    for sch in sec_data {
+        if let Some(m) = sec_map.get_mut(&sch.year) {
+            m.push(sch);
+        } else {
+            sec_map.insert(sch.year, vec![sch]);
+        }
+    }
 
-    let records = aggregate_pdata("full_atomic_england.csv", postcodes, sec_data, prim_data, towns_data, cities_data, &mut geo_data, &regional_data, 2017..2024);
+    let mut prim_map: HashMap<u32, Vec<AggregatePSchoolRecord>> = HashMap::new();
+    println!("Loading prim school geo data - may take some time...");
 
+    for sch in prim_data {
+        if let Some(m) = prim_map.get_mut(&sch.year) {
+            m.push(sch);
+        } else {
+            prim_map.insert(sch.year, vec![sch]);
+        }
+    }
+
+    let writer = Writer::from_path("full_atomic_async.csv")?;
+
+    let writer_mx = Arc::new(Mutex::new(writer));
+    let sec_map = Arc::new(sec_map);
+    let prim_map = Arc::new(prim_map);
+    let towns_data = Arc::new(towns_data);
+    let cities_data = Arc::new(cities_data);
+    let geo_data = Arc::new(geo_data);
+    let regional_data = Arc::new(regional_data);
+
+    let mut current_map = HashMap::new();
+    let mut counter = 0;
+    let mut max = postcodes.len() / 6;
+    let fn_idx = postcodes.len() - 1;
+
+    let mut handles = Vec::new();
+    for (i, (k, v)) in postcodes.into_iter().enumerate() {
+        if counter < max && i < fn_idx {
+            current_map.insert(k, v);
+            counter += 1;
+        } else {
+            let writer_mx = writer_mx.clone();
+            let sec_map = sec_map.clone();
+            let prim_map = prim_map.clone();
+            let towns_data = towns_data.clone();
+            let cities_data = cities_data.clone();
+            let geo_data = geo_data.clone();
+            let regional_data = regional_data.clone();
+            handles.push(std::thread::spawn(move || {
+                aggregate_pdata(writer_mx, current_map, sec_map, prim_map, towns_data, cities_data, geo_data, regional_data, 2017..2024);
+            }));
+            counter = 0;
+            current_map = HashMap::new();
+        }     
+    }
+
+    for handle in handles {
+        handle.join();
+    }
 
     Ok(())
 }
