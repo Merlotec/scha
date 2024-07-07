@@ -6,6 +6,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{collections::HashMap, error::Error, io, os::windows::raw::SOCKET, path::Path, process};
 
 pub mod atomic;
+pub mod assign;
 
 pub const LADs: [&'static str; 34] = [
     "Blackburn with Darwen",

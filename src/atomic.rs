@@ -38,6 +38,7 @@ pub struct ProcessedPcodeRecord {
     pub age_band: Option<u32>,
     pub propertytype: String,
     pub lad: Option<String>,
+    
     pub lat: Option<f64>,
     pub lng: Option<f64>,
 
@@ -78,6 +79,9 @@ pub struct ProcessedPcodeRecord {
     pub best_sec_gcseg2_dis: Option<f32>,
     pub best_sec_of_overall: Option<u32>,
 
+    pub v2_sec: Option<f32>,
+    pub v2_sec_dis: Option<f32>,
+
     // Primary
     pub closest_prim_urn: Option<String>,
     pub closest_prim_name: Option<String>,
@@ -98,6 +102,9 @@ pub struct ProcessedPcodeRecord {
     pub best_prim_rwm_ta: Option<f32>,
     pub best_prim_rwm_ta_dis: Option<f32>,
     pub best_prim_of_overall: Option<u32>,
+
+    pub v2_prim: Option<f32>,
+    pub v2_prim_dis: Option<f32>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -288,7 +295,6 @@ pub fn parse_cities<P: AsRef<Path>>(path: P) -> Result<Vec<Town>, Box<dyn Error>
     //.flexible(true)
     .from_path(path)?;
     let mut iter = rdr.deserialize::<TownRecord>();
-
     
     for result in iter {
         match result {
