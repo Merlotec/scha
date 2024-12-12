@@ -419,41 +419,62 @@ pub struct CircleRecord {
 //     }
 // }
 
-pub fn intersect_exclusive(circles: &[Circle], intersections: &[usize]) -> f64 {
-    // start with base intersection:
-    let base: Vec<Circle> = circles.iter().enumerate().filter_map(|(i, x)| {
-        if intersections.contains(&i) {
-            Some(*x)
-        } else {
-            None
-        }
-    }).collect_vec();
+// pub fn intersect_exclusive(circles: &[Circle], intersections: &[usize]) -> f64 {
+//     // start with base intersection:
+//     let base: Vec<Circle> = circles.iter().enumerate().filter_map(|(i, x)| {
+//         if intersections.contains(&i) {
+//             Some(*x)
+//         } else {
+//             None
+//         }
+//     }).collect_vec();
+//
+//     let others: Vec<usize> = (0..circles.len()).filter_map(|x| {
+//         if intersections.contains(&x) {
+//             None
+//         } else {
+//             Some(x)
+//         }
+//     }).collect();
+//
+//     let mut acc: f64 = Circle::intersect_all(&base);
+//     for c in 1..(others.len() + 1) {
+//         let polarity: f64 = if c % 2 == 0 {
+//             1.0
+//         } else {
+//             -1.0
+//         };
+//
+//         for combs in others.iter().combinations(c) {
+//             let cs: Vec<Circle> = circles.iter().enumerate().filter_map(|(i, x)| {
+//                 if combs.contains(&&i) || intersections.contains(&i) {
+//                     Some(*x)
+//                 } else {
+//                     None
+//                 }
+//             }).collect_vec();
+//
+//             acc += polarity * Circle::intersect_all(&cs);
+//         }
+//     }
+//
+//     acc
+// }
 
-    let others: Vec<usize> = (0..circles.len()).filter_map(|x| {
-        if intersections.contains(&x) {
-            None
-        } else {
-            Some(x)
-        }
-    }).collect();
-
-    let mut acc: f64 = Circle::intersect_all(&base);
-    for c in 1..(others.len() + 1) {
+/// Calculates the total area that `circle` shares with any other circle in the `others` slice.
+pub fn intersect_exclusive(circle: Circle, others: &[Circle]) -> f64 {
+    let mut acc: f64 = 0.0;
+    for c in 0..others.len() {
         let polarity: f64 = if c % 2 == 0 {
             1.0
         } else {
             -1.0
         };
 
-        for combs in others.iter().combinations(c) {
-            let cs: Vec<Circle> = circles.iter().enumerate().filter_map(|(i, x)| {
-                if combs.contains(&&i) || intersections.contains(&i) {
-                    Some(*x)
-                } else {
-                    None
-                }
-            }).collect_vec();
-
+        for combs in others.to_vec().into_iter().combinations(c) {
+            let mut cs = combs.to_vec();
+            cs.push(circle);
+            // When polarity is negative we deduct to remove double counting of previous,
             acc += polarity * Circle::intersect_all(&cs);
         }
     }
@@ -461,6 +482,15 @@ pub fn intersect_exclusive(circles: &[Circle], intersections: &[usize]) -> f64 {
     acc
 }
 
+// Outputs the new radius of the target circle to take up the specified area that does not intersect with any other circle.
+// pub fn scale_to_exclusive_area(circles: &[Circle], origin: Vector2<f64>, a: f64) -> f64 {
+//     let mut r = (a / PI).sqrt();
+//
+//     loop {
+//         let circle = Circle { r, origin };
+//         let a_total = inter
+//     }
+// }
 
 #[test]
 fn test_groups() {
@@ -479,4 +509,24 @@ fn test_groups() {
     ]);
 
     println!("groups: {:?}", gs);
+}
+
+#[test]
+fn test_intersect_exclusive() {
+    let gs = &[
+        Circle::new(0.0, 0.0, 1.0),
+        Circle::new(0.5, 0.0, 0.7),
+        Circle::new(0.0, -0.5, 0.8),
+        Circle::new(0.0, 0.5, 0.8),
+        Circle::new(0.0, 0.5, 0.9),
+        Circle::new(20.0, 0.0, 1.0),
+        Circle::new(20.5, 0.0, 0.7),
+        Circle::new(20.0, -0.5, 0.8),
+        Circle::new(20.0, 0.5, 0.8),
+        Circle::new(20.0, 0.5, 0.9),
+    ];
+
+    let a = intersect_exclusive(Circle::new(0.0, 0.0, 5.0), gs);
+
+    println!("intersect_exclusive: {:?}", a);
 }
