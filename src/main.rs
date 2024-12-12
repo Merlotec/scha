@@ -3,7 +3,7 @@ use csv::Writer;
 use geo_rust::{Country, GeoLocation};
 use regex::Regex;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{collections::HashMap, error::Error, io, os::windows::raw::SOCKET, path::Path, process};
+use std::{collections::HashMap, error::Error, io, path::Path, process};
 
 pub mod atomic;
 pub mod assign;
@@ -435,6 +435,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     //run_schools()
     run_atomic()
     //combine_csv_files("depr", "depr.csv"); Ok(()) 
+    //assign::circle_test();
 }
 
 fn run_schools() -> Result<(), Box<dyn Error>> {

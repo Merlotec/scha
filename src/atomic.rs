@@ -2,7 +2,7 @@ use csv::{ReaderBuilder, StringRecord, Writer};
 use geo_rust::{get_postcode_location, Country, GeoLocation, PostalData};
 use regex::Regex;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{clone, collections::HashMap, error::Error, fs::File, io::{self, Write}, os::windows::raw::SOCKET, path::Path, process, sync::{Arc, Mutex}};
+use std::{clone, collections::HashMap, error::Error, fs::File, io::{self, Write}, path::Path, process, sync::{Arc, Mutex}};
 
 use crate::{first_letters, load_regions, AggregatePSchoolRecord, AggregateSchoolRecord, Scaler, CUM_RPI_DEFL};
 
