@@ -17,6 +17,15 @@ pub enum Intersection {
     None,
 }
 
+impl Intersection {
+    pub fn intersects(&self) -> bool {
+        match self {
+            Self::None => false,
+            _ => true,
+        }
+    }
+}
+
 impl Circle {
     fn new(x: f64, y: f64, r: f64) -> Circle {
         Circle { origin: Vector2::new(x, y), r }
@@ -134,6 +143,34 @@ impl Circle {
         }
     }
 
+    /// Returns the circles that this circle intersects.
+    /// Does not compute area of intersection so is fast.
+    pub fn intersects_many(&self, others: &[Circle]) -> Vec<Circle> {
+        others.iter().filter_map(|x| if self.intersect(x).intersects() { Some(*x) } else { None }).collect()
+    }
+
+    /// Calculates the total area that `circle` shares with any other circle in the `others` slice.
+    pub fn total_intersection(&self, others: &[Circle]) -> f64 {
+        let mut acc: f64 = 0.0;
+        for c in 0..others.len() {
+            let polarity: f64 = if c % 2 == 0 {
+                1.0
+            } else {
+                -1.0
+            };
+
+            for combs in others.to_vec().into_iter().combinations(c) {
+                let mut cs = combs.to_vec();
+                cs.push(*self);
+                // When polarity is negative we deduct to remove double counting of previous,
+                acc += polarity * Circle::intersect_all(&cs);
+            }
+        }
+
+        acc
+    }
+
+
     pub fn intersect_all(circles: &[Circle]) -> f64 {
         let mut points: Vec<(Vector2<f64>, usize, usize)> = Vec::new();
         let mut ignores: Vec<usize> = Vec::new();
@@ -161,10 +198,6 @@ impl Circle {
             }
         }
 
-        for point in points.iter() {
-            println!("p: {:?}", point);
-        }
-
         // only keep intersections in inner most area.
         points.retain(|(p, i, j)| {
             if ignores.contains(i) || ignores.contains(j) {
@@ -181,10 +214,6 @@ impl Circle {
             }
             count == circles.len() - 2 
         });
-
-        for point in points.iter() {
-            println!("pr: {:?}", point);
-        }
 
 
         if points.len() > 2 {
@@ -229,17 +258,13 @@ impl Circle {
                         if cv.dot(&segnorm) <= 0.0 {
                             // Usual situation - smaller segment of the circle to be added.
                             acc += segment_area(circle.r, l);
-                            println!("usual: {}", l);
                         } else {
                             // Unusual situation - larger segment of the circle to be added.
                             acc += PI * circle.r * circle.r - segment_area(circle.r, l); // Add half of the circle
-                            println!("unusual: {}", l);
                         }
                     } 
                 }
             }
-            println!("poly: {}", poly_area);
-            println!("arcs: {}", acc);
             poly_area + acc
         } else if points.len() == 2 {
             let mut c1 = None;
@@ -322,6 +347,7 @@ impl Circle {
         }
         groups
     }
+
 }
 
 
@@ -361,7 +387,6 @@ pub fn circle_test() {
         Circle::new(0.99, 0.64, 0.71),
     ]);
 
-    println!("A: {}", a);
 }
 
 #[test]
@@ -461,36 +486,39 @@ pub struct CircleRecord {
 //     acc
 // }
 
-/// Calculates the total area that `circle` shares with any other circle in the `others` slice.
-pub fn intersect_exclusive(circle: Circle, others: &[Circle]) -> f64 {
-    let mut acc: f64 = 0.0;
-    for c in 0..others.len() {
-        let polarity: f64 = if c % 2 == 0 {
-            1.0
-        } else {
-            -1.0
-        };
+// Outputs the new radius of the target circle to take up the specified area that does not intersect with any other circle.
+pub fn scale_to_exclusive_area(circles: &[Circle], origin: Vector2<f64>, a: f64, mut delta: f64, epsilon: f64, max_iter: usize) -> Option<Circle> {
+    let mut r = (a / PI).sqrt();
+    let mut a_prev = None;
+    for _ in 0..max_iter {
+        let circle = Circle { r, origin };
+        let ints = circle.intersects_many(circles);
 
-        for combs in others.to_vec().into_iter().combinations(c) {
-            let mut cs = combs.to_vec();
-            cs.push(circle);
-            // When polarity is negative we deduct to remove double counting of previous,
-            acc += polarity * Circle::intersect_all(&cs);
+        let a_total = circle.area() - circle.total_intersection(&ints);
+
+        if (a_total - a).abs() < epsilon {
+            return Some(circle);
         }
+
+        println!("Circle area: {}, target: {}, r: {}", a_total, a, r);
+
+        if a_total < a {
+            r += delta;
+            if a_prev > Some(a) {
+                delta *= 0.5;
+            }
+        } else if a_total > a {
+            r -= delta;
+            if a_prev < Some(a) {
+                delta *= 0.5;
+            }
+        }
+
+        a_prev = Some(a_total);
     }
 
-    acc
+    None
 }
-
-// Outputs the new radius of the target circle to take up the specified area that does not intersect with any other circle.
-// pub fn scale_to_exclusive_area(circles: &[Circle], origin: Vector2<f64>, a: f64) -> f64 {
-//     let mut r = (a / PI).sqrt();
-//
-//     loop {
-//         let circle = Circle { r, origin };
-//         let a_total = inter
-//     }
-// }
 
 #[test]
 fn test_groups() {
@@ -526,7 +554,28 @@ fn test_intersect_exclusive() {
         Circle::new(20.0, 0.5, 0.9),
     ];
 
-    let a = intersect_exclusive(Circle::new(0.0, 0.0, 5.0), gs);
+    let a = Circle::new(0.0, 0.0, 5.0).total_intersection(gs);
 
     println!("intersect_exclusive: {:?}", a);
+}
+
+
+#[test]
+fn test_area_scale() {
+    let gs = &[
+        Circle::new(0.0, 0.0, 1.0),
+        Circle::new(0.5, 0.0, 0.7),
+        Circle::new(0.0, -0.5, 0.8),
+        Circle::new(0.0, 0.5, 0.8),
+        Circle::new(0.0, 0.5, 0.9),
+        Circle::new(20.0, 0.0, 1.0),
+        Circle::new(20.5, 0.0, 0.7),
+        Circle::new(20.0, -0.5, 0.8),
+        Circle::new(20.0, 0.5, 0.8),
+        Circle::new(20.0, 0.5, 0.9),
+    ];
+
+    let c = scale_to_exclusive_area(gs, Vector2::new(0.0, 0.0), PI, 1.0, 0.001, 200);
+
+    println!("intersect_exclusive: {}", c.unwrap().r);
 }
