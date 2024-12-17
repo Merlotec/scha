@@ -82,7 +82,6 @@ impl Circle {
                     } else {
                         (other, self)
                     };
-
                     segment_area(larger.r, l) + PI * smaller.r * smaller.r - segment_area(smaller.r, l)
                 }
             },
@@ -102,14 +101,17 @@ impl Circle {
 
     pub fn intersect(&self, other: &Circle) -> Intersection {
         let d = self.distance(other);
-
         if d > self.r + other.r {
             Intersection::None
-        } else if d + other.r < self.r {
+        } else if d + other.r <= self.r {
             Intersection::Inside(*other)
-        } else if d + self.r < other.r {
+        } else if d + self.r <= other.r {
             Intersection::Inside(*self)
+        } else if d == 0.0 {
+            // epsilon difference
+            Intersection::Inside(*other)
         } else {
+            assert_ne!(d, 0.0);
             let (smaller, larger) = if self.r < other.r {
                 (self, other)
             } else {
@@ -152,18 +154,22 @@ impl Circle {
     /// Calculates the total area that `circle` shares with any other circle in the `others` slice.
     pub fn total_intersection(&self, others: &[Circle]) -> f64 {
         let mut acc: f64 = 0.0;
-        for c in 0..others.len() {
+        for c in 1..=others.len() {
             let polarity: f64 = if c % 2 == 0 {
-                1.0
-            } else {
                 -1.0
+            } else {
+                1.0
             };
 
             for combs in others.to_vec().into_iter().combinations(c) {
                 let mut cs = combs.to_vec();
                 cs.push(*self);
                 // When polarity is negative we deduct to remove double counting of previous,
-                acc += polarity * Circle::intersect_all(&cs);
+                let pl = polarity * Circle::intersect_all(&cs);
+                if pl.is_nan() {
+                    panic!("Circle intersection NaN!");
+                }
+                acc += pl;
             }
         }
 
@@ -487,29 +493,34 @@ pub struct CircleRecord {
 // }
 
 // Outputs the new radius of the target circle to take up the specified area that does not intersect with any other circle.
-pub fn scale_to_exclusive_area(circles: &[Circle], origin: Vector2<f64>, a: f64, mut delta: f64, epsilon: f64, max_iter: usize) -> Option<Circle> {
-    let mut r = (a / PI).sqrt();
+#[derive(Debug, Copy, Clone)]
+pub struct RadialArea {
+    origin: Vector2<f64>,
+    area: f64,
+}
+
+pub fn scale_to_exclusive_area(circles: &[Circle], radial: &RadialArea, mut delta: f64, epsilon: f64, max_iter: usize) -> Option<Circle> {
+    let mut r = (radial.area / PI).sqrt();
     let mut a_prev = None;
     for _ in 0..max_iter {
-        let circle = Circle { r, origin };
+        let circle = Circle { r, origin: radial.origin };
         let ints = circle.intersects_many(circles);
+        let intersection = circle.total_intersection(&ints);
+        assert!(intersection >= 0.0);
+        let a_total = circle.area() - intersection;
 
-        let a_total = circle.area() - circle.total_intersection(&ints);
-
-        if (a_total - a).abs() < epsilon {
+        if (a_total - radial.area).abs() < epsilon {
             return Some(circle);
         }
 
-        println!("Circle area: {}, target: {}, r: {}", a_total, a, r);
-
-        if a_total < a {
+        if a_total < radial.area {
             r += delta;
-            if a_prev > Some(a) {
+            if a_prev > Some(radial.area) {
                 delta *= 0.5;
             }
-        } else if a_total > a {
+        } else if a_total > radial.area {
             r -= delta;
-            if a_prev < Some(a) {
+            if a_prev < Some(radial.area) {
                 delta *= 0.5;
             }
         }
@@ -518,6 +529,16 @@ pub fn scale_to_exclusive_area(circles: &[Circle], origin: Vector2<f64>, a: f64,
     }
 
     None
+}
+
+pub fn scale_all(radials: &[RadialArea], delta: f64, epsilon: f64, max_iter: usize) -> Option<Vec<Circle>> {
+    let mut circles = Vec::with_capacity(radials.len());
+
+    for radial in radials {
+        circles.push(scale_to_exclusive_area(&circles, radial, delta, epsilon, max_iter)?)
+    }
+
+    Some(circles)
 }
 
 #[test]
@@ -575,7 +596,21 @@ fn test_area_scale() {
         Circle::new(20.0, 0.5, 0.9),
     ];
 
-    let c = scale_to_exclusive_area(gs, Vector2::new(0.0, 0.0), PI, 1.0, 0.001, 200);
+    let c = scale_to_exclusive_area(gs, &RadialArea { origin: Vector2::new(0.0, 0.0), area: PI }, 1.0, 0.001, 200);
 
     println!("intersect_exclusive: {}", c.unwrap().r);
+}
+
+#[test]
+fn test_scale_all() {
+    let gs = &[
+        RadialArea { origin: Vector2::new(0.0, 0.0), area: PI },
+        RadialArea { origin: Vector2::new(0.2, 0.7), area: PI },
+        RadialArea { origin: Vector2::new(1.2, -0.3), area: PI },
+        RadialArea { origin: Vector2::new(-0.4, 0.5), area: PI },
+    ];
+
+    let c = scale_all(gs, 1.0, 0.001, 200);
+
+    println!("scale_all: {:?}", c);
 }
