@@ -5,8 +5,8 @@ use regex::Regex;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{collections::HashMap, error::Error, io, path::Path, process};
 
-pub mod atomic;
 pub mod assign;
+pub mod atomic;
 
 pub const LADs: [&'static str; 34] = [
     "Blackburn with Darwen",
@@ -46,29 +46,18 @@ pub const LADs: [&'static str; 34] = [
 ];
 
 pub const TARGET_SCHOOL_TYPES: [&'static str; 12] = [
-    "AC",
-    "ACC",
-    "AC1619",
-    "ACC1619",
-    "CY",
-    "F1619",
-    "FSS",
-    "F",
-    "FD",
-    "FD",
-    "VA",
-    "VC",
+    "AC", "ACC", "AC1619", "ACC1619", "CY", "F1619", "FSS", "F", "FD", "FD", "VA", "VC",
 ];
 
 pub const CUM_RPI_DEFL: [f32; 7] = [
-    1.0, //2017
+    1.0,   //2017
     1.036, // 2018 : base * 2017 rpi
     1.070188,
     1.09801288,
     1.114483081,
     1.159062405,
     1.293513644,
-];  
+];
 
 pub struct Scaler {
     vals: Vec<(f32, f32)>,
@@ -108,6 +97,14 @@ struct SchoolRecord {
     pcode: String,
     #[serde(rename = "SCHNAME")]
     name: String,
+    #[serde(rename = "msoa21cd")]
+    msoa: String,
+    #[serde(rename = "density")]
+    density: String,
+    #[serde(rename = "lat")]
+    lag: String,
+    #[serde(rename = "long")]
+    long: String,
     #[serde(rename = "NFTYPE")]
     school_type: String,
     #[serde(rename = "ADMPOL")]
@@ -225,8 +222,6 @@ impl AggregatePRecord {
     }
 }
 
-
-
 impl AggregateRecord {
     pub fn empty(year: String, lad: Option<String>) -> Self {
         Self {
@@ -241,10 +236,16 @@ impl AggregateRecord {
 pub struct AggregateSchoolRecord {
     pub year: u32,
     pub lad: Option<String>,
+    pub msoa: String,
     pub name: String,
     pub pcode: String,
     pub lat: Option<f64>,
     pub lng: Option<f64>,
+    pub x_km: Option<f64>,
+    pub y_km: Option<f64>,
+    pub radius: Option<f64>,
+    pub density: Option<f64>,
+    pub pop: Option<usize>,
     pub urn: String,
     pub school_type: String,
     pub is_state: u32,
@@ -264,7 +265,10 @@ impl AggregateSchoolRecord {
     #[inline]
     pub fn location(&self) -> Option<GeoLocation> {
         if let (Some(lat), Some(lng)) = (self.lat, self.lng) {
-            Some(GeoLocation { latitude: lat, longitude: lng})
+            Some(GeoLocation {
+                latitude: lat,
+                longitude: lng,
+            })
         } else {
             None
         }
@@ -275,7 +279,10 @@ impl AggregatePSchoolRecord {
     #[inline]
     pub fn location(&self) -> Option<GeoLocation> {
         if let (Some(lat), Some(lng)) = (self.lat, self.lng) {
-            Some(GeoLocation { latitude: lat, longitude: lng})
+            Some(GeoLocation {
+                latitude: lat,
+                longitude: lng,
+            })
         } else {
             None
         }
@@ -300,7 +307,6 @@ pub struct AggregatePSchoolRecord {
     pub of_behaviour: Option<u32>,
     pub of_pdev: Option<u32>,
 }
-
 
 trait School {
     fn get_urn(&self) -> &str;
@@ -413,7 +419,11 @@ fn parse_dset<P: AsRef<Path>, S: School + DeserializeOwned>(
             Ok(record) => {
                 let ofsted = ofsted_data.get(record.get_urn()).cloned();
                 let lad = region_map.get(record.get_pcode()).cloned();
-                schools.push(SchoolInfo { record, ofsted, lad })
+                schools.push(SchoolInfo {
+                    record,
+                    ofsted,
+                    lad,
+                })
             }
             Err(e) => {
                 println!("{}", e);
@@ -434,7 +444,7 @@ fn percentage_string_to_float(input: &str) -> Result<f32, std::num::ParseFloatEr
 fn main() -> Result<(), Box<dyn Error>> {
     //run_schools()
     run_atomic()
-    //combine_csv_files("depr", "depr.csv"); Ok(()) 
+    //combine_csv_files("depr", "depr.csv"); Ok(())
     //assign::circle_test();
 }
 
@@ -454,6 +464,9 @@ fn run_schools() -> Result<(), Box<dyn Error>> {
 
     let mut complete_writer_prim = Writer::from_path("all_prim.csv")?;
 
+    let to_bng = Proj::new_known_crs("EPSG:4326", "EPSG:27700", None)
+        .expect("Failed to create transformation");
+
     for i in 2017..2024 {
         // let fname: String = format!("scraw_{}.csv", i);
         // sanitize(&fname, &format!("san_{}", &fname));
@@ -466,22 +479,40 @@ fn run_schools() -> Result<(), Box<dyn Error>> {
 
             match parse_dset::<String, SchoolRecord>(fname, &ofsted, &regions) {
                 Ok(schools) => {
+                    let mut ag_schools = Vec::with_capacity(schools.len());
                     for school in schools {
                         let gcseg2 = percentage_string_to_float(&school.record.gcseg2).ok();
                         let gcseg2_dis = percentage_string_to_float(&school.record.gcseg2_dis).ok();
-            
+
                         let selective = school.record.adm_pol == "SEL";
-            
+
                         let loc = geo_data(&school.record.pcode, &mut geo_map, &geonames_data);
-                        
+
                         // Only choose the right kind of schools.
-                        let state = TARGET_SCHOOL_TYPES.contains(&school.record.school_type.as_str()) && !selective;
-                        complete_writer_sec.serialize(&AggregateSchoolRecord {
+                        let state = TARGET_SCHOOL_TYPES
+                            .contains(&school.record.school_type.as_str())
+                            && !selective;
+
+                        let (x_m, y_m) = to_bng
+                            .convert((lon, lat))
+                            .expect("Failed to transform coordinates");
+
+                        // Convert meters to kilometers
+                        let x_km = x_m / 1000.0;
+                        let y_km = y_m / 1000.0;
+
+                        ag_schools.push(AggregateSchoolRecord {
                             year: i,
                             name: school.record.name.clone(),
                             pcode: school.record.pcode.clone(),
+                            msoa: school.record.msoa.clone(),
+                            density: school.record.density.parse().ok(),
+                            radius: None, // Will allocate once we order by quality.
                             lat: loc.as_ref().map(|x| x.latitude),
                             lng: loc.map(|x| x.longitude),
+                            pop: school.record.pop.parse().ok(),
+                            x_km,
+                            y_km,
                             urn: school.record.urn.clone(),
                             is_selective: selective as u32,
                             school_type: school.record.school_type.clone(),
@@ -494,18 +525,34 @@ fn run_schools() -> Result<(), Box<dyn Error>> {
                             of_educ: school.ofsted.as_ref().and_then(|x| x.educ),
                             of_pdev: school.ofsted.as_ref().and_then(|x| x.pdev),
                             of_sixthform: school.ofsted.as_ref().and_then(|x| x.sixthform),
-            
+
                             gcseg2,
                             gcseg2_dis,
                         });
                     }
 
-                    
+                    // Create circles.
+                    let circles: Vec<assign::RadialArea> = ag_schools
+                        .iter()
+                        .filter_map(|r| {
+                            if let (Some(x), Some(y), Some(pop)) = (r.x_km, r.y_km, r.pop) {
+                                Some(assign::RadialArea {
+                                    origin: Vector2::new(x, y),
+                                    area: area(x.density, x.pop),
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
+                    for school in ag_schools {
+                        complete_writer_sec.serialize(&school);
+                    }
                     println!("parsed schools {}", i);
                 }
                 Err(e) => println!("Failed to parse school: {}", e),
             }
-
         }
         // Primary
         {
@@ -519,7 +566,8 @@ fn run_schools() -> Result<(), Box<dyn Error>> {
                         let loc = geo_data(&school.record.pcode, &mut geo_map, &geonames_data);
 
                         // Only choose the right kind of schools.
-                        let state = TARGET_SCHOOL_TYPES.contains(&school.record.school_type.as_str());
+                        let state =
+                            TARGET_SCHOOL_TYPES.contains(&school.record.school_type.as_str());
                         complete_writer_prim.serialize(&AggregatePSchoolRecord {
                             year: i,
                             name: school.record.name.clone(),
@@ -544,7 +592,6 @@ fn run_schools() -> Result<(), Box<dyn Error>> {
             }
         }
     }
-    
 
     Ok(())
 }

@@ -495,8 +495,8 @@ pub struct CircleRecord {
 // Outputs the new radius of the target circle to take up the specified area that does not intersect with any other circle.
 #[derive(Debug, Copy, Clone)]
 pub struct RadialArea {
-    origin: Vector2<f64>,
-    area: f64,
+    pub origin: Vector2<f64>,
+    pub area: f64,
 }
 
 pub fn scale_to_exclusive_area(circles: &[Circle], radial: &RadialArea, mut delta: f64, epsilon: f64, max_iter: usize) -> Option<Circle> {
