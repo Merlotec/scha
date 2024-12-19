@@ -99,12 +99,12 @@ struct SchoolRecord {
     name: String,
     #[serde(rename = "msoa21cd")]
     msoa: String,
-    #[serde(rename = "density")]
-    density: String,
     #[serde(rename = "lat")]
-    lag: String,
+    lat: String,
     #[serde(rename = "long")]
     long: String,
+    #[serde(rename = "target_density")]
+    target_density: String,
     #[serde(rename = "NFTYPE")]
     school_type: String,
     #[serde(rename = "ADMPOL")]
@@ -244,7 +244,7 @@ pub struct AggregateSchoolRecord {
     pub x_km: Option<f64>,
     pub y_km: Option<f64>,
     pub radius: Option<f64>,
-    pub density: Option<f64>,
+    pub target_density: Option<f64>,
     pub pop: Option<usize>,
     pub urn: String,
     pub school_type: String,
@@ -442,13 +442,12 @@ fn percentage_string_to_float(input: &str) -> Result<f32, std::num::ParseFloatEr
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    //run_schools()
-    run_atomic()
+    run_schools(2019..2020)
+    //run_atomic()
     //combine_csv_files("depr", "depr.csv"); Ok(())
     //assign::circle_test();
 }
-
-fn run_schools() -> Result<(), Box<dyn Error>> {
+fn run_schools(years: std::ops::Range<u32>) -> Result<(), Box<dyn Error>> {
     let regions = load_regions("postcodes.csv")?;
     let ofsted = load_ofsted("ofsted.csv")?;
 
@@ -467,7 +466,7 @@ fn run_schools() -> Result<(), Box<dyn Error>> {
     let to_bng = Proj::new_known_crs("EPSG:4326", "EPSG:27700", None)
         .expect("Failed to create transformation");
 
-    for i in 2017..2024 {
+    for i in years {
         // let fname: String = format!("scraw_{}.csv", i);
         // sanitize(&fname, &format!("san_{}", &fname));
 
@@ -475,7 +474,7 @@ fn run_schools() -> Result<(), Box<dyn Error>> {
         // sanitize(&fname, &format!("san_{}", &fname));
         // continue;
         {
-            let fname = format!("san_scraw_{}.csv", i);
+            let fname = format!("sk_sec_{}.csv", i);
 
             match parse_dset::<String, SchoolRecord>(fname, &ofsted, &regions) {
                 Ok(schools) => {
@@ -493,26 +492,27 @@ fn run_schools() -> Result<(), Box<dyn Error>> {
                             .contains(&school.record.school_type.as_str())
                             && !selective;
 
-                        let (x_m, y_m) = to_bng
-                            .convert((lon, lat))
-                            .expect("Failed to transform coordinates");
-
-                        // Convert meters to kilometers
-                        let x_km = x_m / 1000.0;
-                        let y_km = y_m / 1000.0;
+                        let pos = if let (Some(lat), Some(long)) = (school.record.lat.parse::<f64>().ok(), school.record.long.parse::<f64>().ok()) {
+                            to_bng
+                                .convert((long, lat))
+                                .map(|(x, y)|(x / 1000.0, y / 1000.0)) // Convert to kms
+                                .ok()
+                        } else {
+                            None
+                        };
 
                         ag_schools.push(AggregateSchoolRecord {
                             year: i,
                             name: school.record.name.clone(),
                             pcode: school.record.pcode.clone(),
                             msoa: school.record.msoa.clone(),
-                            density: school.record.density.parse().ok(),
+                            target_density: school.record.target_density.parse().ok(),
                             radius: None, // Will allocate once we order by quality.
                             lat: loc.as_ref().map(|x| x.latitude),
                             lng: loc.map(|x| x.longitude),
                             pop: school.record.pop.parse().ok(),
-                            x_km,
-                            y_km,
+                            x_km: pos.map(|(x, _)| x),
+                            y_km: pos.map(|(_, y)| y),
                             urn: school.record.urn.clone(),
                             is_selective: selective as u32,
                             school_type: school.record.school_type.clone(),
@@ -531,23 +531,34 @@ fn run_schools() -> Result<(), Box<dyn Error>> {
                         });
                     }
 
-                    // Create circles.
-                    let circles: Vec<assign::RadialArea> = ag_schools
+                    // Remove schools without the stuff we need to calculate radius.
+                    let (drained, mut ag_schools): (Vec<_>, Vec<_>) = ag_schools.into_iter().partition(|r| r.gcseg2.is_none() || r.x_km.is_none() || r.y_km.is_none() || r.target_density.is_none() || r.pop.is_none());
+
+                    ag_schools.sort_by(|a, b| b.gcseg2.unwrap().partial_cmp(&a.gcseg2.unwrap()).unwrap());
+
+                    // First sort schools by quality. Ordering matches ag_schools one to one.
+                    let radials: Vec<assign::RadialArea> = ag_schools
                         .iter()
                         .filter_map(|r| {
-                            if let (Some(x), Some(y), Some(pop)) = (r.x_km, r.y_km, r.pop) {
-                                Some(assign::RadialArea {
-                                    origin: Vector2::new(x, y),
-                                    area: area(x.density, x.pop),
-                                })
-                            } else {
-                                None
-                            }
+                            Some(assign::RadialArea {
+                                origin: Vector2::new(r.x_km.unwrap(), r.y_km.unwrap()),
+                                area: r.target_density.unwrap() / r.pop.unwrap() as f64,
+                            })
                         })
                         .collect();
 
+                    let circles = assign::scale_all(&radials, 0.1, 1e-4, 400).ok_or("Failed to scale radials!")?;
+
+                    for (school, circle) in ag_schools.iter_mut().zip(circles.iter()) {
+                        school.radius = Some(circle.r);
+                    }
+
                     for school in ag_schools {
-                        complete_writer_sec.serialize(&school);
+                        complete_writer_sec.serialize(&school)?;
+                    }
+
+                    for school in drained {
+                        complete_writer_sec.serialize(&school)?;
                     }
                     println!("parsed schools {}", i);
                 }
@@ -555,49 +566,50 @@ fn run_schools() -> Result<(), Box<dyn Error>> {
             }
         }
         // Primary
-        {
-            let fname = format!("san_scrawp_{}.csv", i);
-
-            match parse_dset::<String, PSchoolRecord>(fname, &ofsted, &regions) {
-                Ok(schools) => {
-                    for school in schools {
-                        let rwm_ta = percentage_string_to_float(&school.record.rwm_ta).ok();
-                        let rwm_ta_dis = percentage_string_to_float(&school.record.rwm_ta_dis).ok();
-                        let loc = geo_data(&school.record.pcode, &mut geo_map, &geonames_data);
-
-                        // Only choose the right kind of schools.
-                        let state =
-                            TARGET_SCHOOL_TYPES.contains(&school.record.school_type.as_str());
-                        complete_writer_prim.serialize(&AggregatePSchoolRecord {
-                            year: i,
-                            name: school.record.name.clone(),
-                            pcode: school.record.pcode.clone(),
-                            lat: loc.as_ref().map(|x| x.latitude),
-                            lng: loc.map(|x| x.longitude),
-                            urn: school.record.urn.clone(),
-                            is_state: state as u32,
-                            school_type: school.record.school_type.clone(),
-                            lad: school.lad,
-                            of_overall: school.ofsted.as_ref().and_then(|x| x.overall),
-                            of_behaviour: school.ofsted.as_ref().and_then(|x| x.behaviour),
-                            of_educ: school.ofsted.as_ref().and_then(|x| x.educ),
-                            of_pdev: school.ofsted.as_ref().and_then(|x| x.pdev),
-                            rwm_ta,
-                            rwm_ta_dis,
-                        });
-                    }
-                    println!("parsed pschools {}", i);
-                }
-                Err(e) => println!("Failed to parse school: {}", e),
-            }
-        }
+        // {
+        //     let fname = format!("san_scrawp_{}.csv", i);
+        //
+        //     match parse_dset::<String, PSchoolRecord>(fname, &ofsted, &regions) {
+        //         Ok(schools) => {
+        //             for school in schools {
+        //                 let rwm_ta = percentage_string_to_float(&school.record.rwm_ta).ok();
+        //                 let rwm_ta_dis = percentage_string_to_float(&school.record.rwm_ta_dis).ok();
+        //                 let loc = geo_data(&school.record.pcode, &mut geo_map, &geonames_data);
+        //
+        //                 // Only choose the right kind of schools.
+        //                 let state =
+        //                     TARGET_SCHOOL_TYPES.contains(&school.record.school_type.as_str());
+        //                 complete_writer_prim.serialize(&AggregatePSchoolRecord {
+        //                     year: i,
+        //                     name: school.record.name.clone(),
+        //                     pcode: school.record.pcode.clone(),
+        //                     lat: loc.as_ref().map(|x| x.latitude),
+        //                     lng: loc.map(|x| x.longitude),
+        //                     urn: school.record.urn.clone(),
+        //                     is_state: state as u32,
+        //                     school_type: school.record.school_type.clone(),
+        //                     lad: school.lad,
+        //                     of_overall: school.ofsted.as_ref().and_then(|x| x.overall),
+        //                     of_behaviour: school.ofsted.as_ref().and_then(|x| x.behaviour),
+        //                     of_educ: school.ofsted.as_ref().and_then(|x| x.educ),
+        //                     of_pdev: school.ofsted.as_ref().and_then(|x| x.pdev),
+        //                     rwm_ta,
+        //                     rwm_ta_dis,
+        //                 });
+        //             }
+        //             println!("parsed pschools {}", i);
+        //         }
+        //         Err(e) => println!("Failed to parse school: {}", e),
+        //     }
+        // }
     }
 
     Ok(())
 }
 
 use csv::ReaderBuilder;
-
+use nalgebra::Vector2;
+use proj::Proj;
 use crate::atomic::{geo_data, load_geo_data};
 
 fn combine_csv_files(input_folder: &str, output_file: &str) -> Result<(), Box<dyn Error>> {
