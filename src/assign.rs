@@ -161,11 +161,36 @@ impl Circle {
                 1.0
             };
 
-            for combs in others.to_vec().into_iter().combinations(c) {
+            for (i, combs) in others.to_vec().into_iter().combinations(c).enumerate() {
                 let mut cs = combs.to_vec();
                 cs.push(*self);
                 // When polarity is negative we deduct to remove double counting of previous,
                 let pl = polarity * Circle::intersect_all(&cs);
+                if pl.is_nan() {
+                    panic!("Circle intersection NaN!");
+                }
+                acc += pl;
+                //println!("APPEND (c={}; {}): pl={}, t={}, cs:{:?}", c, i, pl, acc, &cs);
+            }
+        }
+
+        acc
+    }
+
+    pub fn total_intersection_approx(&self, others: &[Circle]) -> f64 {
+        let mut acc: f64 = 0.0;
+        for c in 1..=others.len() {
+            let polarity: f64 = if c % 2 == 0 {
+                -1.0
+            } else {
+                1.0
+            };
+
+            for (i, combs) in others.to_vec().into_iter().combinations(c).enumerate() {
+                let mut cs = combs.to_vec();
+                cs.push(*self);
+                // When polarity is negative we deduct to remove double counting of previous,
+                let pl = polarity * crate::intersect::intersect_all_approx(&cs);
                 if pl.is_nan() {
                     panic!("Circle intersection NaN!");
                 }
@@ -176,7 +201,7 @@ impl Circle {
         acc
     }
 
-
+    const EPSILON: f64 = 1e-6;
     pub fn intersect_all(circles: &[Circle]) -> f64 {
         let mut points: Vec<(Vector2<f64>, usize, usize)> = Vec::new();
         let mut ignores: Vec<usize> = Vec::new();
@@ -204,7 +229,32 @@ impl Circle {
             }
         }
 
-        // only keep intersections in inner most area.
+        // Ignore circles with duplicate points.
+        let mut to_add: Vec<(Vector2<f64>, usize, usize)> = Vec::new();
+        for combs in points.iter().combinations(2) {
+            let (p1, c1a, c1b) = *combs[0];
+            let (p2, c2a, c2b) = *combs[1];
+
+            if p1.metric_distance(&p2) < Self::EPSILON {
+                // Remove common circle.
+                if c2a == c1a {
+                    to_add.push((p1, c1b, c2b));
+                    ignores.push(c1a);
+                } else if c2b == c1a {
+                    to_add.push((p1, c1b, c2a));
+                    ignores.push(c1a);
+                } else if c2a == c1b {
+                    to_add.push((p1, c1a, c2b));
+                    ignores.push(c1b);
+                } else if c2b == c1b {
+                    to_add.push((p1, c1a, c2a));
+                    ignores.push(c1b);
+                }
+            }
+        }
+
+        points.append(&mut to_add);
+
         points.retain(|(p, i, j)| {
             if ignores.contains(i) || ignores.contains(j) {
                 return false;
@@ -223,14 +273,13 @@ impl Circle {
 
 
         if points.len() > 2 {
-                // calculate inner polygon area. 
+            // calculate inner polygon area.
             let poly_area = polygon_area(points.iter().map(|(p, _, _)| *p).collect::<Vec<Vector2<f64>>>().as_slice());
 
             // since our shape is convex we can use the 'centre of mass' of the points to determine directions of the normals of the faces, because the centre of mass will lie in the shape for convex shapes.
             let cm = points.iter().fold(Vector2::zeros(), |x, (p, _, _)| x + p) / points.len() as f64;
 
             let mut acc = 0.0;
-
             for (c, circle) in circles.iter().enumerate() {
                 // Get line segment for circle.
                 if !ignores.contains(&c) {
@@ -251,24 +300,38 @@ impl Circle {
                         let l = v.norm();
                         let vn = v.normalize();
                         let n1 = Vector2::new(-vn.y, vn.x);
-    
+
                         let vcm = cm - p1;
-    
-                        let segnorm = if vcm.dot(&n1) < 0.0 {
+
+                        let vdot = vcm.dot(&n1);
+
+                        let segnorm = if vdot < 0.0 {
                             n1
-                        } else {
+                        } else if vdot > 0.0 {
                             -n1
-                        };
-    
-                        let cv = circle.origin - p1;
-                        if cv.dot(&segnorm) <= 0.0 {
-                            // Usual situation - smaller segment of the circle to be added.
-                            acc += segment_area(circle.r, l);
                         } else {
-                            // Unusual situation - larger segment of the circle to be added.
-                            acc += PI * circle.r * circle.r - segment_area(circle.r, l); // Add half of the circle
+                            panic!("Zero vdot!");
+                        };
+
+                        if vdot.abs() < Self::EPSILON {
+                            // We cant this to determine which segment to use.
+                            // Since we basically have a line for a polygon we use the method we use for two circles.
+                        } else {
+                            let cv = circle.origin - p1;
+                            if cv.dot(&segnorm) <= 0.0 {
+                                // Usual situation - smaller segment of the circle to be added.
+                                let seg = segment_area(circle.r, l);
+                                //println!("usual: {}, vdot={}", seg, vdot);
+                                acc += seg;
+                            } else {
+                                // Unusual situation - larger segment of the circle to be added.
+                                let seg = PI * circle.r * circle.r - segment_area(circle.r, l);
+                                //println!("unusual: {}, vdot={}", seg, vdot);
+                                acc += seg; // Add half of the circle
+                            }
                         }
-                    } 
+
+                    }
                 }
             }
             poly_area + acc
@@ -276,15 +339,31 @@ impl Circle {
             let mut c1 = None;
             let mut c2 = None;
 
-            for (i, c) in circles.iter().enumerate(){
-                if !ignores.contains(&i) {
-                    if c1.is_none() {
-                        c1 = Some(*c);
+            //println!("pair");
+
+            // Must actually use the circles of the relevant points in case we have the two points inside a larger circle, but circles are not ignored because they aren't within one another.
+            for (_, a, b) in points {
+                if c1.is_none() {
+                    c1 = Some(circles[a]);
+                } else if c2.is_none() {
+                    if (c1 == Some(circles[a])) {
+                        c2 = Some(circles[b]);
+                    } else if (c2 == Some(circles[b])) {
+                        c2 = Some(circles[a]);
                     } else {
-                        c2 = Some(*c);
+                        panic!("The two intersection points are not from the same intersection!");
                     }
                 }
             }
+            // for (i, c) in circles.iter().enumerate(){
+            //     if !ignores.contains(&i) {
+            //         if c1.is_none() {
+            //             c1 = Some(*c);
+            //         } else {
+            //             c2 = Some(*c);
+            //         }
+            //     }
+            // }
 
             let c1 = c1.unwrap();
             let c2 = c2.unwrap();
@@ -292,6 +371,7 @@ impl Circle {
         } else {
             let remaining: Vec<usize> = (0..circles.len()).filter_map(|x| if !ignores.contains(&x) { Some(x) } else { None }).collect_vec();
             if remaining.len() == 1 {
+                //println!("whole!");
                 circles[remaining[0]].area()
             } else {
                 0.0 // No intersections
@@ -499,19 +579,32 @@ pub struct RadialArea {
     pub area: f64,
 }
 
+use geo_booleanop::boolean::BooleanOp;
+
 pub fn scale_to_exclusive_area(circles: &[Circle], radial: &RadialArea, mut delta: f64, epsilon: f64, max_iter: usize) -> Option<Circle> {
     let mut r = (radial.area / PI).sqrt();
     let mut a_prev = None;
+    let mut circs = None;
+    let mut out = None;
     for _ in 0..max_iter {
         let circle = Circle { r, origin: radial.origin };
+        out = Some(circle);
         let ints = circle.intersects_many(circles);
-        let intersection = circle.total_intersection(&ints);
-        assert!(intersection >= 0.0);
-        let a_total = circle.area() - intersection;
+       // let intersection = circle.total_intersection(&ints);
+        let int_approx = crate::intersect::overlap(circle, &ints, 1500);//circle.total_intersection_approx(&ints);
+
+        //let a_total = circle.area() - intersection;
+        let a_approx = circle.area() - int_approx;
+
+        //println!("target: {}, curr: {} ({}), r: {}, ints: {}, inter: {} ({})", radial.area, a_total, a_approx, r, ints.len(), intersection, int_approx);
+        //assert!(intersection >= 0.0);
+
+        let a_total = a_approx;
 
         if (a_total - radial.area).abs() < epsilon {
             return Some(circle);
         }
+
 
         if a_total < radial.area {
             r += delta;
@@ -526,16 +619,20 @@ pub fn scale_to_exclusive_area(circles: &[Circle], radial: &RadialArea, mut delt
         }
 
         a_prev = Some(a_total);
+        circs = Some(ints);
     }
 
-    None
+    println!("NONE FOUND!!");
+    crate::render::draw_circles_to_png(circs.as_ref().unwrap(), 1000, 1000, "bad.png");
+    out
 }
 
 pub fn scale_all(radials: &[RadialArea], delta: f64, epsilon: f64, max_iter: usize) -> Option<Vec<Circle>> {
     let mut circles = Vec::with_capacity(radials.len());
-
-    for radial in radials {
-        circles.push(scale_to_exclusive_area(&circles, radial, delta, epsilon, max_iter)?)
+    let len = radials.len();
+    for (i, radial) in radials.into_iter().enumerate() {
+        circles.push(scale_to_exclusive_area(&circles, radial, delta, epsilon, max_iter)?);
+        println!("Radial {}/{}: o={}, a={}", i, len, radial.origin, radial.area);
     }
 
     Some(circles)

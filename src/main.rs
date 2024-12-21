@@ -7,6 +7,8 @@ use std::{collections::HashMap, error::Error, io, path::Path, process};
 
 pub mod assign;
 pub mod atomic;
+mod intersect;
+mod render;
 
 pub const LADs: [&'static str; 34] = [
     "Blackburn with Darwen",
@@ -45,8 +47,8 @@ pub const LADs: [&'static str; 34] = [
     "Wyre",
 ];
 
-pub const TARGET_SCHOOL_TYPES: [&'static str; 12] = [
-    "AC", "ACC", "AC1619", "ACC1619", "CY", "F1619", "FSS", "F", "FD", "FD", "VA", "VC",
+pub const TARGET_SCHOOL_TYPES: [&'static str; 11] = [
+    "AC", "ACC", "AC1619", "ACC1619", "CY", "F1619", "FSS", "F", "FD", "VA", "VC",
 ];
 
 pub const CUM_RPI_DEFL: [f32; 7] = [
@@ -245,7 +247,7 @@ pub struct AggregateSchoolRecord {
     pub y_km: Option<f64>,
     pub radius: Option<f64>,
     pub target_density: Option<f64>,
-    pub pop: Option<usize>,
+    pub pop: Option<u32>,
     pub urn: String,
     pub school_type: String,
     pub is_state: u32,
@@ -447,6 +449,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     //combine_csv_files("depr", "depr.csv"); Ok(())
     //assign::circle_test();
 }
+
+const STATE_PROP: f64 = 0.8;
+
 fn run_schools(years: std::ops::Range<u32>) -> Result<(), Box<dyn Error>> {
     let regions = load_regions("postcodes.csv")?;
     let ofsted = load_ofsted("ofsted.csv")?;
@@ -485,7 +490,7 @@ fn run_schools(years: std::ops::Range<u32>) -> Result<(), Box<dyn Error>> {
 
                         let selective = school.record.adm_pol == "SEL";
 
-                        let loc = geo_data(&school.record.pcode, &mut geo_map, &geonames_data);
+                        //let loc = geo_data(&school.record.pcode, &mut geo_map, &geonames_data);
 
                         // Only choose the right kind of schools.
                         let state = TARGET_SCHOOL_TYPES
@@ -501,16 +506,16 @@ fn run_schools(years: std::ops::Range<u32>) -> Result<(), Box<dyn Error>> {
                             None
                         };
 
-                        ag_schools.push(AggregateSchoolRecord {
+                        let r = AggregateSchoolRecord {
                             year: i,
                             name: school.record.name.clone(),
                             pcode: school.record.pcode.clone(),
                             msoa: school.record.msoa.clone(),
                             target_density: school.record.target_density.parse().ok(),
                             radius: None, // Will allocate once we order by quality.
-                            lat: loc.as_ref().map(|x| x.latitude),
-                            lng: loc.map(|x| x.longitude),
-                            pop: school.record.pop.parse().ok(),
+                            lat: school.record.lat.parse::<f64>().ok(),
+                            lng: school.record.long.parse::<f64>().ok(),
+                            pop: school.record.pop.parse::<f32>().map(|x| x as u32).ok(),
                             x_km: pos.map(|(x, _)| x),
                             y_km: pos.map(|(_, y)| y),
                             urn: school.record.urn.clone(),
@@ -528,11 +533,17 @@ fn run_schools(years: std::ops::Range<u32>) -> Result<(), Box<dyn Error>> {
 
                             gcseg2,
                             gcseg2_dis,
-                        });
+                        };
+
+                        //println!("vs: {}, {}, {}, {}, {}, x:{}", r.gcseg2.is_none(), r.x_km.is_none(), r.y_km.is_none(), r.target_density.is_none(), r.pop.is_none(), school.record.pop);
+
+                        ag_schools.push(r);
                     }
 
                     // Remove schools without the stuff we need to calculate radius.
-                    let (drained, mut ag_schools): (Vec<_>, Vec<_>) = ag_schools.into_iter().partition(|r| r.gcseg2.is_none() || r.x_km.is_none() || r.y_km.is_none() || r.target_density.is_none() || r.pop.is_none());
+                    let (drained, mut ag_schools): (Vec<_>, Vec<_>) = ag_schools.into_iter().partition(|r| (r.gcseg2.is_none() || r.x_km.is_none() || r.y_km.is_none() || r.target_density.is_none() || r.pop.is_none() || r.is_selective == 1 || r.is_state == 0));
+
+                    println!("ag: {}", ag_schools.len());
 
                     ag_schools.sort_by(|a, b| b.gcseg2.unwrap().partial_cmp(&a.gcseg2.unwrap()).unwrap());
 
@@ -542,12 +553,12 @@ fn run_schools(years: std::ops::Range<u32>) -> Result<(), Box<dyn Error>> {
                         .filter_map(|r| {
                             Some(assign::RadialArea {
                                 origin: Vector2::new(r.x_km.unwrap(), r.y_km.unwrap()),
-                                area: r.target_density.unwrap() / r.pop.unwrap() as f64,
+                                area: r.pop.unwrap() as f64 / (r.target_density.unwrap() * STATE_PROP),
                             })
                         })
                         .collect();
 
-                    let circles = assign::scale_all(&radials, 0.1, 1e-4, 400).ok_or("Failed to scale radials!")?;
+                    let circles = assign::scale_all(&radials, 0.5, 1e-3, 1000).ok_or("Failed to scale radials!")?;
 
                     for (school, circle) in ag_schools.iter_mut().zip(circles.iter()) {
                         school.radius = Some(circle.r);
@@ -561,6 +572,8 @@ fn run_schools(years: std::ops::Range<u32>) -> Result<(), Box<dyn Error>> {
                         complete_writer_sec.serialize(&school)?;
                     }
                     println!("parsed schools {}", i);
+
+                    render::draw_circles_to_png(&circles, 1000, 1000, "map.png");
                 }
                 Err(e) => println!("Failed to parse school: {}", e),
             }
