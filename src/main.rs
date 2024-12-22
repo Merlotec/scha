@@ -107,6 +107,8 @@ struct SchoolRecord {
     long: String,
     #[serde(rename = "target_density")]
     target_density: String,
+    #[serde(rename = "target_prop")]
+    target_prop: String,
     #[serde(rename = "NFTYPE")]
     school_type: String,
     #[serde(rename = "ADMPOL")]
@@ -247,6 +249,7 @@ pub struct AggregateSchoolRecord {
     pub y_km: Option<f64>,
     pub radius: Option<f64>,
     pub target_density: Option<f64>,
+    pub target_prop: Option<f64>,
     pub pop: Option<u32>,
     pub urn: String,
     pub school_type: String,
@@ -515,6 +518,7 @@ fn run_schools(years: std::ops::Range<u32>) -> Result<(), Box<dyn Error>> {
                             radius: None, // Will allocate once we order by quality.
                             lat: school.record.lat.parse::<f64>().ok(),
                             lng: school.record.long.parse::<f64>().ok(),
+                            target_prop: target_prop.record.long.parse::<f64>().ok(),
                             pop: school.record.pop.parse::<f32>().map(|x| x as u32).ok(),
                             x_km: pos.map(|(x, _)| x),
                             y_km: pos.map(|(_, y)| y),
@@ -541,7 +545,7 @@ fn run_schools(years: std::ops::Range<u32>) -> Result<(), Box<dyn Error>> {
                     }
 
                     // Remove schools without the stuff we need to calculate radius.
-                    let (drained, mut ag_schools): (Vec<_>, Vec<_>) = ag_schools.into_iter().partition(|r| (r.gcseg2.is_none() || r.x_km.is_none() || r.y_km.is_none() || r.target_density.is_none() || r.pop.is_none() || r.is_selective == 1 || r.is_state == 0));
+                    let (drained, mut ag_schools): (Vec<_>, Vec<_>) = ag_schools.into_iter().partition(|r| (r.gcseg2.is_none() || r.x_km.is_none() || r.y_km.is_none() || r.target_density.is_none() || r.pop.is_none() || r.target_prop.is_none() || r.is_selective == 1 || r.is_state == 0));
 
                     println!("ag: {}", ag_schools.len());
 
@@ -553,7 +557,7 @@ fn run_schools(years: std::ops::Range<u32>) -> Result<(), Box<dyn Error>> {
                         .filter_map(|r| {
                             Some(assign::RadialArea {
                                 origin: Vector2::new(r.x_km.unwrap(), r.y_km.unwrap()),
-                                area: r.pop.unwrap() as f64 / (r.target_density.unwrap() * STATE_PROP),
+                                area: r.pop.unwrap() as f64 / (r.target_density.unwrap() * r.target_prop.unwrap()),
                             })
                         })
                         .collect();

@@ -4,5 +4,6 @@
 /pcodes
 /schooldata
 /skl
+/data
 *.csv
 *.zip
