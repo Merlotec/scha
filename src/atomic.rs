@@ -42,6 +42,9 @@ pub struct ProcessedPcodeRecord {
     pub lat: Option<f64>,
     pub lng: Option<f64>,
 
+    pub x_km: Option<f64>,
+    pub y_km: Option<f64>,
+
     pub nearest_town_name: Option<String>,
     pub nearest_town_dist: Option<f64>,
     pub nearest_admin_name: Option<String>,
@@ -127,6 +130,8 @@ pub struct RegionalProcessedPcodeRecord {
     pub lat: Option<f64>,
     pub lng: Option<f64>,
 
+    pub x_km: Option<f64>,
+    pub y_km: Option<f64>,
     
     pub nearest_town_name: Option<String>,
     pub nearest_town_dist: Option<f64>,
