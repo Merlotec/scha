@@ -3,7 +3,8 @@ use geo_rust::{get_postcode_location, Country, GeoLocation, PostalData};
 use regex::Regex;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{clone, collections::HashMap, error::Error, fs::File, io::{self, Write}, path::Path, process, sync::{Arc, Mutex}};
-
+use nalgebra::Vector2;
+use proj::Proj;
 use crate::{first_letters, load_regions, AggregatePSchoolRecord, AggregateSchoolRecord, Scaler, CUM_RPI_DEFL};
 
 
@@ -41,9 +42,6 @@ pub struct ProcessedPcodeRecord {
     
     pub lat: Option<f64>,
     pub lng: Option<f64>,
-
-    pub x_km: Option<f64>,
-    pub y_km: Option<f64>,
 
     pub nearest_town_name: Option<String>,
     pub nearest_town_dist: Option<f64>,
@@ -85,6 +83,9 @@ pub struct ProcessedPcodeRecord {
     pub v2_sec: Option<f32>,
     pub v2_sec_dis: Option<f32>,
 
+    pub x_km: Option<f64>,
+    pub y_km: Option<f64>,
+
     // Primary
     pub closest_prim_urn: Option<String>,
     pub closest_prim_name: Option<String>,
@@ -105,6 +106,18 @@ pub struct ProcessedPcodeRecord {
     pub best_prim_rwm_ta: Option<f32>,
     pub best_prim_rwm_ta_dis: Option<f32>,
     pub best_prim_of_overall: Option<u32>,
+
+    pub sec_interact: Option<f32>,
+    pub sec_interact_dis: Option<f32>,
+
+    pub sec_interact_best: Option<String>,
+    pub sec_interact_dis_best: Option<String>,
+
+    pub prim_interact: Option<f32>,
+    pub prim_interact_dis: Option<f32>,
+
+    pub prim_interact_best: Option<String>,
+    pub prim_interact_dis_best: Option<String>,
 
     pub v2_prim: Option<f32>,
     pub v2_prim_dis: Option<f32>,
@@ -130,8 +143,8 @@ pub struct RegionalProcessedPcodeRecord {
     pub lat: Option<f64>,
     pub lng: Option<f64>,
 
-    // pub x_km: Option<f64>,
-    // pub y_km: Option<f64>,
+    pub x_km: Option<f64>,
+    pub y_km: Option<f64>,
     
     pub nearest_town_name: Option<String>,
     pub nearest_town_dist: Option<f64>,
@@ -190,6 +203,18 @@ pub struct RegionalProcessedPcodeRecord {
     pub best_prim_rwm_ta: Option<f32>, // selected by school with highest best_prim_rwm_ta_dis
     pub best_prim_rwm_ta_dis: Option<f32>,
     pub best_prim_of_overall: Option<u32>,
+
+    pub sec_interact: Option<f32>,
+    pub sec_interact_dis: Option<f32>,
+
+    pub sec_interact_best: Option<String>,
+    pub sec_interact_dis_best: Option<String>,
+
+    pub prim_interact: Option<f32>,
+    pub prim_interact_dis: Option<f32>,
+
+    pub prim_interact_best: Option<String>,
+    pub prim_interact_dis_best: Option<String>,
 }
 
 impl RegionalProcessedPcodeRecord {
@@ -199,6 +224,8 @@ impl RegionalProcessedPcodeRecord {
             pcode_area,
             lat: record.lat,
             lng: record.lng,
+            x_km: record.x_km,
+            y_km: record.y_km,
             year: record.year,
             id: record.id,
             pcode: record.pcode,
@@ -257,6 +284,14 @@ impl RegionalProcessedPcodeRecord {
             best_prim_rwm_ta: record.best_prim_rwm_ta,
             best_prim_rwm_ta_dis: record.best_prim_rwm_ta_dis,
             best_prim_of_overall: record.best_prim_of_overall,
+            sec_interact: record.sec_interact,
+            sec_interact_dis: record.sec_interact_dis,
+            sec_interact_best: record.sec_interact_best,
+            sec_interact_dis_best: record.sec_interact_dis_best,
+            prim_interact: record.prim_interact,
+            prim_interact_dis: record.prim_interact_dis,
+            prim_interact_best: record.prim_interact_best,
+            prim_interact_dis_best: record.prim_interact_dis_best
         }
     }
 }
@@ -483,6 +518,8 @@ pub fn aggregate_pdata(writer: Arc<Mutex<Writer<File>>>, pcodes: HashMap<String,
     //let mut processed_records: Vec<ProcessedPcodeRecord> = Vec::new();
     let len = pcodes.len();
 
+    let to_bng = Proj::new_known_crs("EPSG:4326", "EPSG:27700", None)
+        .expect("Failed to create transformation");
 
     for (i, (pcode, records)) in pcodes.into_iter().enumerate() {
         if i % 1000 == 0 {
@@ -504,6 +541,15 @@ pub fn aggregate_pdata(writer: Arc<Mutex<Writer<File>>>, pcodes: HashMap<String,
         if let Some(loc) = &pc_loc {
             lat = Some(loc.latitude);
             lng = Some(loc.longitude);
+
+            let pos = if let (Some(lat), Some(long)) = (lat, lng) {
+                to_bng
+                    .convert((long, lat))
+                    .map(|(x, y)|(x / 1000.0, y / 1000.0)) // Convert to kms
+                    .ok()
+            } else {
+                None
+            };
 
             dist_london = Some(loc.distance(&LONDON));
             // Find closest
@@ -534,17 +580,17 @@ pub fn aggregate_pdata(writer: Arc<Mutex<Writer<File>>>, pcodes: HashMap<String,
             for (j, (record, lad)) in records.into_iter().enumerate() {
                 let mut closest_sec_dist: Option<f32> = None;
                 let mut closest_prim_dist: Option<f32> = None;
-            
+
                 let mut closest_sec: Option<AggregateSchoolRecord> = None;
                 let mut closest_prim: Option<AggregatePSchoolRecord> = None;
-        
+
                 let mut weighted_sec_of_educ: Scaler = Scaler::new();
                 let mut weighted_sec_of_behaviour: Scaler = Scaler::new();
                 let mut weighted_sec_gcseg2: Scaler = Scaler::new();
                 let mut weighted_sec_gcseg2_dis: Scaler = Scaler::new();
                 let mut weighted_sec_of_overall: Scaler = Scaler::new();
                 let mut weighted_sec_of_sixthform: Scaler = Scaler::new();
-                
+
                 let mut weighted_prim_of_educ: Scaler = Scaler::new();
                 let mut weighted_prim_of_behaviour: Scaler = Scaler::new();
                 let mut weighted_prim_rwm_ta: Scaler = Scaler::new();
@@ -558,10 +604,22 @@ pub fn aggregate_pdata(writer: Arc<Mutex<Writer<File>>>, pcodes: HashMap<String,
                 let mut best_prim_rwm_ta: Option<f32> = None;
                 let mut best_prim_rwm_ta_dis: Option<f32> = None;
                 let mut best_prim_of_overall: Option<u32> = None; // Separate to above
-        
-        
+
+
                 let mut sec_est_year: Option<u32> = None;
                 let mut prim_est_year: Option<u32> = None;
+
+                let mut sec_interact: Option<f32> = None;
+                let mut sec_interact_dis: Option<f32> = None;
+
+                let mut sec_interact_best: Option<String> = None;
+                let mut sec_interact_dis_best: Option<String> = None;
+
+                let mut prim_interact: Option<f32> = None;
+                let mut prim_interact_dis: Option<f32> = None;
+
+                let mut prim_interact_best: Option<String> = None;
+                let mut prim_interact_dis_best: Option<String> = None;
 
                 let rpi_defl = CUM_RPI_DEFL.get((record.year - 2017) as usize).copied();
                 let mut sec_list: Option<&Vec<AggregateSchoolRecord>> = None;
@@ -575,12 +633,33 @@ pub fn aggregate_pdata(writer: Arc<Mutex<Writer<File>>>, pcodes: HashMap<String,
                             sec_est_year = Some(y);
                             sec_list = Some(x);
                             break;
-                        } 
+                        }
                         y -= 1;
                     }
                 }
                 if let Some(sec_list) = sec_list {
                     for (i, school) in sec_list.iter().enumerate() {
+                        // Assume that it is ordered by quality.
+
+                        if let Some((x_km, y_km)) = pos {
+                            if let (Some(r), Some(school_x), Some(school_y)) = (school.radius, school.x_km, school.y_km) {
+                                let origin = Vector2::new(school_x, school_y);
+                                let ppos = Vector2::new(x_km, y_km);
+                                if origin.metric_distance(&ppos) < r {
+                                    // We should go to this school.
+                                    if sec_interact.is_none() || sec_interact < school.gcseg2 {
+                                        sec_interact = school.gcseg2;
+                                        sec_interact_best = Some(school.urn.clone());
+                                    }
+                                    if sec_interact_dis.is_none() || sec_interact_dis < school.gcseg2_dis {
+                                        sec_interact_dis = school.gcseg2_dis; // TODO: maybe get compute this by using a different ordering to get highest _dis score.
+                                        sec_interact_dis_best = Some(school.urn.clone());
+                                    }
+                                }
+                            }
+                        }
+
+
                         if school.is_state != 1 || school.is_selective == 1 {
                             continue;
                         }
@@ -608,7 +687,7 @@ pub fn aggregate_pdata(writer: Arc<Mutex<Writer<File>>>, pcodes: HashMap<String,
                                 if let Some(x) = school.of_educ {
                                     weighted_sec_of_educ.add(x as f32, w);
                                 }
-                                
+
                                 if let Some(x) = school.of_behaviour {
                                     weighted_sec_of_behaviour.add(x as f32, w);
                                 }
@@ -632,8 +711,8 @@ pub fn aggregate_pdata(writer: Arc<Mutex<Writer<File>>>, pcodes: HashMap<String,
                         }
                     }
                 }
-                
-                let mut prim_list: Option<&Vec< AggregatePSchoolRecord>> = None;
+
+                let mut prim_list: Option<&Vec<AggregatePSchoolRecord>> = None;
                 if let Some(x) = prim_map.get(&record.year) {
                     prim_est_year = Some(record.year);
                     prim_list = Some(x);
@@ -644,7 +723,7 @@ pub fn aggregate_pdata(writer: Arc<Mutex<Writer<File>>>, pcodes: HashMap<String,
                             prim_est_year = Some(y);
                             prim_list = Some(x);
                             break;
-                        } 
+                        }
                         y -= 1;
                     }
                 }
@@ -654,6 +733,25 @@ pub fn aggregate_pdata(writer: Arc<Mutex<Writer<File>>>, pcodes: HashMap<String,
                         if school.is_state != 1 {
                             continue;
                         }
+
+                        if let Some((x_km, y_km)) = pos {
+                            if let (Some(r), Some(school_x), Some(school_y)) = (school.radius, school.x_km, school.y_km) {
+                                let origin = Vector2::new(school_x, school_y);
+                                let ppos = Vector2::new(x_km, y_km);
+                                if origin.metric_distance(&ppos) < r {
+                                    // We should go to this school.
+                                    if prim_interact.is_none() || prim_interact < school.rwm_ta {
+                                        prim_interact = school.rwm_ta;
+                                        prim_interact_best = Some(school.urn.clone());
+                                    }
+                                    if prim_interact_dis.is_none() || prim_interact_dis < school.rwm_ta_dis {
+                                        prim_interact_dis = school.rwm_ta_dis; // TODO: maybe get compute this by using a different ordering to get highest _dis score.
+                                        prim_interact_dis_best = Some(school.urn.clone());
+                                    }
+                                }
+                            }
+                        }
+
                         if let Some(school_loc) = school.location() {
                             let dist = loc.distance(&school_loc) as f32;
                             if closest_prim_dist.map(|x| dist < x).unwrap_or(true) {
@@ -738,6 +836,9 @@ pub fn aggregate_pdata(writer: Arc<Mutex<Writer<File>>>, pcodes: HashMap<String,
                         sec_est_year,
                         prim_est_year,
 
+                        x_km: pos.map(|(x, _)| x),
+                        y_km: pos.map(|(_, y)| y),
+
                         dist_london,
                         nearest_town_dist: closest_town_dist,
                         nearest_admin_name: closest_town.as_ref().map(|x| x.record.admin_name.clone()),
@@ -786,6 +887,18 @@ pub fn aggregate_pdata(writer: Arc<Mutex<Writer<File>>>, pcodes: HashMap<String,
                         best_prim_of_overall, 
                         best_prim_rwm_ta, 
                         best_prim_rwm_ta_dis,
+
+                        sec_interact,
+                        sec_interact_dis,
+
+                        sec_interact_best,
+                        sec_interact_dis_best,
+
+                        prim_interact,
+                        prim_interact_dis,
+
+                        prim_interact_best,
+                        prim_interact_dis_best
                     });
                 }
             }
@@ -852,7 +965,7 @@ pub fn remove_wales<P1: AsRef<Path>, P2: AsRef<Path>>(input: P1, out: P2) -> Res
 pub fn run_atomic() -> Result<(), Box<dyn Error>> {
     let regional_data = load_regional_data("areas.csv")?;
     //add_region("england_atomic.csv", "england_reg_atomic.csv", &regional_data);
-    let year_range = 2017..2024;
+    let year_range = 2019..2020;
     let regions = load_regions("postcodes.csv")?;
 
     let postcodes = parse_postcodes("pdata.csv", &regions, year_range)?;
@@ -923,7 +1036,7 @@ pub fn run_atomic() -> Result<(), Box<dyn Error>> {
             let geo_data = geo_data.clone();
             let regional_data = regional_data.clone();
             handles.push(std::thread::spawn(move || {
-                aggregate_pdata(writer_mx, current_map, sec_map, prim_map, towns_data, cities_data, geo_data, regional_data, 2017..2024);
+                aggregate_pdata(writer_mx, current_map, sec_map, prim_map, towns_data, cities_data, geo_data, regional_data, 2019..2020);
             }));
             counter = 0;
             current_map = HashMap::new();
