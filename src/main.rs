@@ -463,8 +463,8 @@ fn percentage_string_to_float(input: &str) -> Result<f32, std::num::ParseFloatEr
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    run_schools(2019..2020)
-    //run_atomic()
+    //run_schools(2019..2020)
+    run_atomic()
     //combine_csv_files("depr", "depr.csv"); Ok(())
     //assign::circle_test();
 }
@@ -515,10 +515,13 @@ fn run_schools(years: std::ops::Range<u32>) -> Result<(), Box<dyn Error>> {
                             .contains(&school.record.school_type.as_str())
                             && !selective;
 
-                        let pos = if let (Some(lat), Some(long)) = (school.record.lat.parse::<f64>().ok(), school.record.long.parse::<f64>().ok()) {
+                        let pos = if let (Some(lat), Some(long)) = (
+                            school.record.lat.parse::<f64>().ok(),
+                            school.record.long.parse::<f64>().ok(),
+                        ) {
                             to_bng
                                 .convert((long, lat))
-                                .map(|(x, y)|(x / 1000.0, y / 1000.0)) // Convert to kms
+                                .map(|(x, y)| (x / 1000.0, y / 1000.0)) // Convert to kms
                                 .ok()
                         } else {
                             None
@@ -560,11 +563,22 @@ fn run_schools(years: std::ops::Range<u32>) -> Result<(), Box<dyn Error>> {
                     }
 
                     // Remove schools without the stuff we need to calculate radius.
-                    let (drained, mut ag_schools): (Vec<_>, Vec<_>) = ag_schools.into_iter().partition(|r| (r.gcseg2.is_none() || r.x_km.is_none() || r.y_km.is_none() || r.target_density.is_none() || r.pop.is_none() || r.target_prop.is_none() || r.is_selective == 1 || r.is_state == 0));
+                    let (drained, mut ag_schools): (Vec<_>, Vec<_>) =
+                        ag_schools.into_iter().partition(|r| {
+                            (r.gcseg2.is_none()
+                                || r.x_km.is_none()
+                                || r.y_km.is_none()
+                                || r.target_density.is_none()
+                                || r.pop.is_none()
+                                || r.target_prop.is_none()
+                                || r.is_selective == 1
+                                || r.is_state == 0)
+                        });
 
                     println!("ag: {}", ag_schools.len());
 
-                    ag_schools.sort_by(|a, b| b.gcseg2.unwrap().partial_cmp(&a.gcseg2.unwrap()).unwrap());
+                    ag_schools
+                        .sort_by(|a, b| b.gcseg2.unwrap().partial_cmp(&a.gcseg2.unwrap()).unwrap());
 
                     // First sort schools by quality. Ordering matches ag_schools one to one.
                     let radials: Vec<assign::RadialArea> = ag_schools
@@ -572,12 +586,14 @@ fn run_schools(years: std::ops::Range<u32>) -> Result<(), Box<dyn Error>> {
                         .filter_map(|r| {
                             Some(assign::RadialArea {
                                 origin: Vector2::new(r.x_km.unwrap(), r.y_km.unwrap()),
-                                area: r.pop.unwrap() as f64 / (r.target_density.unwrap() * r.target_prop.unwrap()),
+                                area: r.pop.unwrap() as f64
+                                    / (r.target_density.unwrap() * r.target_prop.unwrap()),
                             })
                         })
                         .collect();
 
-                    let circles = assign::scale_all(&radials, 0.5, 1e-3, 1000).ok_or("Failed to scale radials!")?;
+                    let circles = assign::scale_all(&radials, 0.5, 1e-3, 1000)
+                        .ok_or("Failed to scale radials!")?;
 
                     for (school, circle) in ag_schools.iter_mut().zip(circles.iter()) {
                         school.radius = Some(circle.r);
@@ -609,10 +625,13 @@ fn run_schools(years: std::ops::Range<u32>) -> Result<(), Box<dyn Error>> {
                         let rwm_ta_dis = percentage_string_to_float(&school.record.rwm_ta_dis).ok();
                         let loc = geo_data(&school.record.pcode, &mut geo_map, &geonames_data);
 
-                        let pos = if let (Some(lat), Some(long)) = (school.record.lat.parse::<f64>().ok(), school.record.long.parse::<f64>().ok()) {
+                        let pos = if let (Some(lat), Some(long)) = (
+                            school.record.lat.parse::<f64>().ok(),
+                            school.record.long.parse::<f64>().ok(),
+                        ) {
                             to_bng
                                 .convert((long, lat))
-                                .map(|(x, y)|(x / 1000.0, y / 1000.0)) // Convert to kms
+                                .map(|(x, y)| (x / 1000.0, y / 1000.0)) // Convert to kms
                                 .ok()
                         } else {
                             None
@@ -647,11 +666,21 @@ fn run_schools(years: std::ops::Range<u32>) -> Result<(), Box<dyn Error>> {
                     }
 
                     // Remove schools without the stuff we need to calculate radius.
-                    let (drained, mut ag_schools): (Vec<_>, Vec<_>) = ag_schools.into_iter().partition(|r| (r.rwm_ta.is_none() || r.x_km.is_none() || r.y_km.is_none() || r.target_density.is_none() || r.pop.is_none() || r.target_prop.is_none() || r.is_state == 0));
+                    let (drained, mut ag_schools): (Vec<_>, Vec<_>) =
+                        ag_schools.into_iter().partition(|r| {
+                            (r.rwm_ta.is_none()
+                                || r.x_km.is_none()
+                                || r.y_km.is_none()
+                                || r.target_density.is_none()
+                                || r.pop.is_none()
+                                || r.target_prop.is_none()
+                                || r.is_state == 0)
+                        });
 
                     println!("ag: {}", ag_schools.len());
 
-                    ag_schools.sort_by(|a, b| b.rwm_ta.unwrap().partial_cmp(&a.rwm_ta.unwrap()).unwrap());
+                    ag_schools
+                        .sort_by(|a, b| b.rwm_ta.unwrap().partial_cmp(&a.rwm_ta.unwrap()).unwrap());
 
                     // First sort schools by quality. Ordering matches ag_schools one to one.
                     let radials: Vec<assign::RadialArea> = ag_schools
@@ -659,12 +688,14 @@ fn run_schools(years: std::ops::Range<u32>) -> Result<(), Box<dyn Error>> {
                         .filter_map(|r| {
                             Some(assign::RadialArea {
                                 origin: Vector2::new(r.x_km.unwrap(), r.y_km.unwrap()),
-                                area: r.pop.unwrap() as f64 / (r.target_density.unwrap() * r.target_prop.unwrap()),
+                                area: r.pop.unwrap() as f64
+                                    / (r.target_density.unwrap() * r.target_prop.unwrap()),
                             })
                         })
                         .collect();
 
-                    let circles = assign::scale_all(&radials, 0.5, 1e-3, 1000).ok_or("Failed to scale radials!")?;
+                    let circles = assign::scale_all(&radials, 0.5, 1e-3, 1000)
+                        .ok_or("Failed to scale radials!")?;
 
                     for (school, circle) in ag_schools.iter_mut().zip(circles.iter()) {
                         school.radius = Some(circle.r);
@@ -691,10 +722,10 @@ fn run_schools(years: std::ops::Range<u32>) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+use crate::atomic::{geo_data, load_geo_data};
 use csv::ReaderBuilder;
 use nalgebra::Vector2;
 use proj::Proj;
-use crate::atomic::{geo_data, load_geo_data};
 
 fn combine_csv_files(input_folder: &str, output_file: &str) -> Result<(), Box<dyn Error>> {
     let mut writer = Writer::from_path(output_file)?;
